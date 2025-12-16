@@ -2,7 +2,7 @@
 
 ProjectX Desktop is a comprehensive, local-first endpoint security auditing tool designed to provide real-time visibility into your system's security posture. Built with **Python (PyQt6)** and powered by **OSQuery**, it offers enterprise-grade telemetry without the need for a central server.
 
-![ProjectX Dashboard](https://via.placeholder.com/800x450?text=ProjectX+Dashboard+Preview)
+![ProjectX Dashboard](https://i.ibb.co/zhjQY1RN/Project-X-Security-Preview.webp)
 
 ## 🛡️ Key Features
 
