@@ -1,0 +1,22 @@
+# Secrets (NEVER UPLOAD THESE)
+config.json
+keys.env
+.env
+
+# Database & Logs
+*.db
+*.log
+projectx.log
+
+# Python compiled files
+__pycache__/
+*.py[cod]
+
+# Virtual Environment
+venv/
+env/
+.venv/
+
+# IDE settings (Optional)
+.vscode/
+.idea/

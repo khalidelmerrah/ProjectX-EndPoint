@@ -1,0 +1,6 @@
+psutil
+requests
+PyQt6
+wmi; platform_system=='Windows'
+pywin32; platform_system=='Windows'
+keyring
