@@ -106,20 +106,42 @@ if __name__ == "__main__":
     loader = LoaderScreen()
     loader.show()
     
-    # Worker for initial scan
-    worker = ScanWorker()
-    worker.progress.connect(loader.update_status)
+    # Check Safe Mode
+    from managers import ConfigManager
+    config = ConfigManager.load_config()
+    safe_mode = config.get("safe_mode", "false").lower() == "true"
     
-    def on_scan_finished():
-        logging.info("Initial Scan Complete. Launching Dashboard.")
-        # Create Main Window, it will load fresh data from DB
-        global window
-        window = MainWindow()
-        window.show()
-        loader.close()
+    if safe_mode:
+        logging.info("Safe Mode (Fast Load) Enabled. Skipping initial scan.")
+        loader.update_status("Fast Load: Retrieving cached data...")
         
-    worker.finished.connect(on_scan_finished)
-    worker.start()
+        # Direct Launch with slight delay for visual confirmation
+        def fast_launch():
+            logging.info("Fast Launching Dashboard.")
+            global window
+            window = MainWindow()
+            window.show()
+            loader.close()
+            
+        # Use a timer to simulate 'Retrieving cached data' briefly (e.g., 800ms)
+        QTimer.singleShot(800, fast_launch)
+        
+    else:
+        logging.info("Full Mode. Starting initial scan...")
+        # Worker for initial scan
+        worker = ScanWorker(skip_cve_sync=True)
+        worker.progress.connect(loader.update_status)
+        
+        def on_scan_finished():
+            logging.info("Initial Scan Complete. Launching Dashboard.")
+            # Create Main Window, it will load fresh data from DB
+            global window
+            window = MainWindow()
+            window.show()
+            loader.close()
+            
+        worker.finished.connect(on_scan_finished)
+        worker.start()
     
     exit_code = app.exec()
     

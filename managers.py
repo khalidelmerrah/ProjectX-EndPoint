@@ -19,9 +19,16 @@ except ImportError:
 # Secure Credential Storage
 import keyring
 
+try:
+    import yara
+except ImportError:
+    yara = None
+
+import hashlib
+
 class ConfigManager:
     SERVICE_ID = "ProjectX_Desktop"
-    KEYS = ["nist_api_key", "gemini_api_key"]
+    KEYS = ["nist_api_key", "gemini_api_key", "vt_api_key", "safe_mode"]
 
     @staticmethod
     def load_config() -> Dict[str, str]:
@@ -110,7 +117,8 @@ class OSQueryClient:
                 capture_output=True, 
                 text=True, 
                 encoding='utf-8',
-                creationflags=creation_flags
+                creationflags=creation_flags,
+                timeout=10
             )
             
             if result.returncode == 0:
@@ -268,6 +276,65 @@ class InventoryManager:
             except Exception:
                 pass
         return items
+
+    def get_system_health(self):
+        health = {
+            "cpu": {},
+            "ram": {},
+            "disk": []
+        }
+        try:
+            # CPU
+            health["cpu"]["percent"] = psutil.cpu_percent(interval=None)
+            health["cpu"]["count"] = psutil.cpu_count(logical=True)
+            
+            # RAM
+            mem = psutil.virtual_memory()
+            health["ram"]["total"] = mem.total
+            health["ram"]["available"] = mem.available
+            health["ram"]["percent"] = mem.percent
+            
+            # Disk
+            for part in psutil.disk_partitions():
+                try:
+                    usage = psutil.disk_usage(part.mountpoint)
+                    health["disk"].append({
+                        "device": part.device,
+                        "total": usage.total,
+                        "free": usage.free,
+                        "percent": usage.percent
+                    })
+                except: 
+                    pass
+        except Exception as e:
+            logging.error(f"Health Check Error: {e}")
+        return health
+
+    def get_system_metadata(self):
+        meta = {"os_install_date": "", "bios_date": ""}
+        if osq_client.available:
+            # OS Install Date
+            try:
+                data = osq_client.query("SELECT install_date FROM os_version")
+                if data:
+                    meta["os_install_date"] = data[0].get("install_date", "")
+            except: pass
+            
+            # BIOS Date - "bios_info" table does not exist on Windows
+            # We skip osquery for this and rely on WMI fallback below.
+            pass
+        
+        # Fallback to WMI if missing (Windows)
+        if not meta["bios_date"] and wmi:
+            try:
+                c = wmi.WMI()
+                for bios in c.Win32_BIOS():
+                    meta["bios_date"] = str(bios.ReleaseDate)
+                    break
+            except Exception as e:
+                logging.error(f"WMI BIOS Date Error: {e}")
+                
+        return meta
 
     def get_services(self) -> List[Dict[str, Any]]:
         services = []
@@ -583,38 +650,67 @@ class VulnEngine:
             return 0
         try:
             end_date = datetime.datetime.now()
-            start_date = end_date - datetime.timedelta(days=30)
+            start_date = end_date - datetime.timedelta(days=120)
             
             pub_start = start_date.strftime("%Y-%m-%dT%H:%M:%S.000")
             pub_end = end_date.strftime("%Y-%m-%dT%H:%M:%S.000")
             
             headers = {"apiKey": self.api_key}
-            url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?pubStartDate={pub_start}&pubEndDate={pub_end}&cvssV3Severity=CRITICAL"
+            base_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+            start_index = 0
+            results_per_page = 2000
             
-            logging.info(f"Querying NIST NVD: {url}")
-            resp = requests.get(url, headers=headers, timeout=10)
+            self.cached_cves = []
             
-            if resp.status_code == 200:
+            while True:
+                # Loop for pagination
+                url = f"{base_url}?pubStartDate={pub_start}&pubEndDate={pub_end}&startIndex={start_index}&resultsPerPage={results_per_page}"
+                logging.info(f"Querying NIST NVD (Index {start_index}): {url}")
+                
+                resp = requests.get(url, headers=headers, timeout=30)
+                
+                if resp.status_code != 200:
+                    logging.error(f"NIST API Error: {resp.status_code}")
+                    break
+                    
                 data = resp.json()
                 vulnerabilities = data.get('vulnerabilities', [])
-                self.cached_cves = []
+                total_results = data.get('totalResults', 0)
+                
                 for item in vulnerabilities:
                     cve = item.get('cve', {})
                     cve_id = cve.get('id')
                     desc = cve.get('descriptions', [{}])[0].get('value', 'No description')
-                    metrics = cve.get('metrics', {}).get('cvssMetricV31', [{}])[0].get('cvssData', {})
-                    score = metrics.get('baseScore', 0.0)
                     
-                    self.cached_cves.append({
-                        'cve_id': cve_id,
-                        'description': desc,
-                        'cvss_score': score
-                    })
-                logging.info(f"Fetched {len(self.cached_cves)} recent critical CVEs.")
-                return len(self.cached_cves)
-            else:
-                logging.error(f"NIST API Error: {resp.status_code} - {resp.text}")
-                return 0
+                    # Try V3.1, then V3.0, then V2
+                    metrics = cve.get('metrics', {})
+                    score = 0.0
+                    if 'cvssMetricV31' in metrics:
+                         score = metrics['cvssMetricV31'][0]['cvssData']['baseScore']
+                    elif 'cvssMetricV30' in metrics:
+                         score = metrics['cvssMetricV30'][0]['cvssData']['baseScore']
+                    elif 'cvssMetricV2' in metrics:
+                         score = metrics['cvssMetricV2'][0]['cvssData']['baseScore']
+                    
+                    # Store if critical, high, or medium (score > 4.0 approx) or just keep all > 0
+                    if score > 0:
+                        self.cached_cves.append({
+                            'cve_id': cve_id,
+                            'description': desc,
+                            'cvss_score': score
+                        })
+                
+                logging.info(f"Fetched {len(vulnerabilities)} entries. Total Cached: {len(self.cached_cves)}")
+                
+                start_index += len(vulnerabilities)
+                if start_index >= total_results:
+                    break
+                    
+                # Rate limit safety
+                import time
+                time.sleep(2) 
+            
+            return len(self.cached_cves)
         except Exception as e:
             logging.error(f"CVE Sync Exception: {e}")
             return 0
@@ -622,26 +718,74 @@ class VulnEngine:
     def match_vulnerabilities(self, software_list: List[Dict]) -> List[Dict]:
         matches = []
         if not self.cached_cves:
-            # NO MOCK DATA
-            logging.warning("No CVEs in cache. Skipping matching.")
-            return matches
+            self.sync_cves()
         
-        # Real Matching
         for sw in software_list:
-            sw_name = sw['name'].lower()
+            sw_name = sw.get('name', '').lower()
             if len(sw_name) < 4: continue 
             
             for cve in self.cached_cves:
-                if sw_name in cve['description'].lower():
-                    matches.append({
-                        'software': sw['name'],
-                        'software_id': 0,
-                        'cve_id': cve['cve_id'],
-                        'description': cve['description'],
-                        'cvss_score': cve['cvss_score'],
-                        'confidence': 50
-                    })
+                # Naive match: if software name is in CVE description? 
+                # Or better: check against product field if available (NVD usually has CPE, but we are simplifying)
+                # Let's assume description match for now as per previous logic attempt
+                if sw_name in cve.get('description', '').lower():
+                     matches.append({
+                         "software_id": sw.get("id"),
+                         "name": sw.get("name"),
+                         "cve_id": cve.get("cve_id"),
+                         "confidence": "Medium",
+                         "status": "Detected"
+                     })
         return matches
+
+
+class YaraManager:
+    def __init__(self, rules_dir="rules"):
+        self.rules = None
+        self.rules_dir = rules_dir
+        self.compile_rules()
+
+    def compile_rules(self):
+        if not yara:
+            logging.warning("YARA not installed.")
+            return
+
+        if not os.path.exists(self.rules_dir):
+            try:
+                os.makedirs(self.rules_dir)
+                # Create a dummy rule so it works out of the box
+                dummy_rule = """
+rule Dummy {
+    condition: false
+}
+"""
+                with open(os.path.join(self.rules_dir, "dummy.yar"), "w") as f:
+                    f.write(dummy_rule)
+            except Exception as e:
+                logging.error(f"Failed to create rules dir: {e}")
+
+        filepaths = {}
+        for root, dirs, files in os.walk(self.rules_dir):
+            for file in files:
+                if file.endswith(".yar") or file.endswith(".yara"):
+                     filepaths[file] = os.path.join(root, file)
+        
+        if filepaths:
+            try:
+                self.rules = yara.compile(filepaths=filepaths)
+                logging.info(f"Compiled {len(filepaths)} YARA rules.")
+            except Exception as e:
+                logging.error(f"Failed to compile YARA rules: {e}")
+
+    def scan_file(self, file_path):
+        if not self.rules:
+            return []
+        try:
+            matches = self.rules.match(file_path)
+            return matches
+        except Exception as e:
+            # logging.error(f"Error scanning {file_path}: {e}") # Verbose
+            return []
 
 class AIAssistant:
     def __init__(self, api_key: str = ""):
@@ -712,3 +856,85 @@ class AIAssistant:
             return self.explain_exposure(context_data, context_data.get('risk_reasons',''))
         else:
             return f"Risk Analysis for {risk_type}"
+
+class ThreatIntelManager:
+    def __init__(self):
+        self.config = ConfigManager.load_config()
+        self.api_key = self.config.get("vt_api_key", "") or self.config.get("gemini_api_key", "")
+
+    @staticmethod
+    def get_file_hash(path):
+        sha256_hash = hashlib.sha256()
+        try:
+            with open(path, "rb") as f:
+                for byte_block in iter(lambda: f.read(4096), b""):
+                    sha256_hash.update(byte_block)
+            return sha256_hash.hexdigest()
+        except Exception as e:
+            logging.error(f"Hash error: {e}")
+            return None
+
+    def check_virustotal(self, target):
+        """
+        Checks VirusTotal for a file path or hash.
+        If target is a path (exists on disk), calculates hash first.
+        """
+        if not self.api_key:
+            return {"error": "No API Key"}
+
+        file_hash = target
+        if os.path.exists(target):
+            file_hash = self.get_file_hash(target)
+            if not file_hash:
+                return {"error": "Could not calculate hash"}
+
+        url = f"https://www.virustotal.com/api/v3/files/{file_hash}"
+        headers = {
+            "x-apikey": self.api_key
+        }
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                stats = data.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
+                # Inject Hash for UI context
+                stats['hash'] = file_hash
+                return stats
+            elif response.status_code == 404:
+                return {"result": "Clean (Not Found in VT)", "harmless": 0, "malicious": 0, "hash": file_hash}
+            else:
+                return {"error": f"VT API Error: {response.status_code}"}
+        except Exception as e:
+            return {"error": str(e)}
+
+
+class ResponseManager:
+    @staticmethod
+    def kill_process(pid: int) -> bool:
+        try:
+            p = psutil.Process(pid)
+            p.terminate()
+            return True
+        except psutil.NoSuchProcess:
+            return False
+        except psutil.AccessDenied:
+            logging.error(f"Access Denied terminating PID {pid}")
+            return False
+        except Exception as e:
+            logging.error(f"Error terminating PID {pid}: {e}")
+            return False
+
+    @staticmethod
+    def block_ip_firewall(ip: str) -> bool:
+        # Windows only: netsh advfirewall firewall add rule name="ProjectX Block {ip}" dir=in action=block remoteip={ip}
+        try:
+            cmd = f'netsh advfirewall firewall add rule name="ProjectX Block {ip}" dir=in action=block remoteip={ip}'
+            # Run as admin is required. Assuming app has privs or will fail.
+            subprocess.check_call(cmd, shell=True)
+            return True
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Failed to block IP {ip}: {e}")
+            return False
+        except Exception as e:
+            logging.error(f"Error blocking IP {ip}: {e}")
+            return False

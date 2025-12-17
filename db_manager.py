@@ -207,6 +207,31 @@ class DatabaseManager:
             hostnames TEXT,
             ip_address TEXT
         )''')
+        
+        # 21. system_metadata (Health Scorecard)
+        cursor.execute('''CREATE TABLE IF NOT EXISTS system_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )''')
+        
+        # 22. telemetry_fim_alerts (FIM)
+        cursor.execute('''CREATE TABLE IF NOT EXISTS telemetry_fim_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            file_path TEXT,
+            action_type TEXT,
+            severity TEXT
+        )''')
+
+        # 23. scan_summaries (Change Tracking)
+        cursor.execute('''CREATE TABLE IF NOT EXISTS scan_summaries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            category TEXT,
+            item_count INTEGER,
+            delta_count INTEGER
+        )''')
+
 
         conn.commit()
         conn.close()
@@ -290,6 +315,15 @@ class DatabaseManager:
             return False
         finally:
             conn.close()
+
+    def update_metadata(self, key: str, value: str):
+        """Upsert metadata key-value pair."""
+        return self.execute_update("INSERT OR REPLACE INTO system_metadata (key, value) VALUES (?, ?)", (key, str(value)))
+
+    def get_metadata(self, key: str) -> str:
+        """Get metadata value by key."""
+        rows = self.execute_query("SELECT value FROM system_metadata WHERE key = ?", (key,))
+        return rows[0][0] if rows else ""
 
 def get_advisory_by_link(link: str) -> Optional[Dict[str, Any]]:
     """Fetches an advisory by link link to check cache."""

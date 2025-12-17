@@ -60,13 +60,13 @@ def fetch_advisory_metadata(link: str) -> dict:
         logging.error(f"Failed to fetch metadata for {link}: {e}")
     return {}
 
-def fetch_advisories() -> list:
+def fetch_advisories(limit=50, start_index=0) -> list:
     """
     Fetches and parses the WatchGuard advisory feed.
     Returns a list of advisory dictionaries.
     """
     try:
-        logging.info("Fetching WatchGuard advisory feed...")
+        logging.info(f"Fetching WatchGuard advisory feed (Limit: {limit}, Offset: {start_index})...")
         response = requests.get(ADVISORY_FEED_URL, headers=HEADERS, timeout=15)
         if response.status_code != 200:
             raise Exception(f"Failed to fetch feed: {response.status_code}")
@@ -81,9 +81,10 @@ def fetch_advisories() -> list:
             items = root.findall('.//item') 
             
         count = 0
-        limit = 50 
         
-        for item in items:
+        for index, item in enumerate(items):
+            if index < start_index:
+                continue
             if count >= limit:
                 break
                 
