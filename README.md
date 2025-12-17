@@ -28,7 +28,7 @@ ProjectX Desktop is a comprehensive, local-first endpoint security auditing tool
 
 1.  **Clone the Repository**
     ```bash
-    git clone https://github.com/yourusername/projectx-desktop.git
+    git clone https://github.com/khalidelmerrah/projectx-desktop.git
     cd projectx-desktop
     ```
 
