@@ -1,5 +1,6 @@
 import sqlite3
 import logging
+from textwrap import dedent
 from typing import List, Tuple, Any, Optional, Dict
 import os
 
@@ -262,13 +263,16 @@ class DatabaseManager:
             # Check existence
             cursor.execute("SELECT advisory_id FROM advisories WHERE advisory_id = ?", (data['advisory_id'],))
             exists = cursor.fetchone()
-            
+
             if exists:
-                cursor.execute('''UPDATE advisories SET 
-                    title=?, link=?, pub_date=?, description=?, severity=?, impact=?, 
-                    cvss_vector=?, vendor=?, cve_ids=?, products=?, summary=?, 
-                    html_title=?, html_description=?, html_fetched_at=?, updated_at=?
-                    WHERE advisory_id=?''',
+                update_sql = dedent("""
+                    UPDATE advisories SET
+                        title=?, link=?, pub_date=?, description=?, severity=?, impact=?,
+                        cvss_vector=?, vendor=?, cve_ids=?, products=?, summary=?,
+                        html_title=?, html_description=?, html_fetched_at=?, updated_at=?
+                    WHERE advisory_id=?
+                """)
+                cursor.execute(update_sql,
                     (data['title'], data['link'], str(data['pub_date']), data['description'], data['severity'], data['impact'],
                      data['cvss_vector'], data['vendor'], data['cve_ids'], data['products'], data['summary'],
                      data['html_title'], data['html_description'], str(data['html_fetched_at']), str(data['updated_at']),
