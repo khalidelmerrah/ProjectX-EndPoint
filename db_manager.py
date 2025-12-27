@@ -3,7 +3,7 @@ MODULE: db_manager.py
 ================================================================================
 PROJECT:        ProjectX Endpoint Protection Platform (Academic Reference)
 AUTHOR:         ProjectX Development Team
-INSTITUTION:    University of Cybersecurity & Software Engineering
+INSTITUTION:    National School of Applied Sciences (ENSA) Fès
 DATE:           2025-12-27
 LICENSE:        MIT License (Educational)
 PYTHON VER:     3.11+
