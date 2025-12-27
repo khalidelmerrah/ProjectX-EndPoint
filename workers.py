@@ -85,6 +85,8 @@ class ScanWorker(QThread):
     
     def __init__(self, scan_categories: List[str] = None, skip_cve_sync: bool = False):
         """
+        Constructor.
+        
         Args:
             scan_categories (list): Optional list of checks to run (e.g., ['network', 'software']).
             skip_cve_sync (bool): If True, skips the slow download of CVE definitions.
@@ -98,13 +100,13 @@ class ScanWorker(QThread):
         # Best Practice: Move these to `run()` to ensure thread locality.
         self.db = DatabaseManager() 
         
-        # Managers
-        self.inventory_mgr = SoftwareManager() # Use the new SoftwareManager class
+        # Instantiate the Managers to perform actual work
+        self.inventory_mgr = SoftwareManager()
         self.network_mgr = NetworkScanner()
         self.vuln_engine = VulnEngine()
         self.cert_mgr = CertificateManager()
         
-        # Logic Flags
+        # Store configuration flags
         self.scan_categories = scan_categories if scan_categories else ['all']
         self.skip_cve_sync = skip_cve_sync
 
@@ -133,7 +135,7 @@ class ScanWorker(QThread):
             delta = new_count - old_count
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            # Record the summary event
+            # Record the summary event to the Posture Log
             self.db.execute_update(
                 "INSERT INTO system_posture (check_name, status, timestamp) VALUES (?, ?, ?)",
                 (f"Scan_{category}", f"Completed (Items: {new_count}, Delta: {delta})", timestamp)
@@ -146,17 +148,20 @@ class ScanWorker(QThread):
         The Entry Point for the thread.
         This code runs in parallel to the Main UI Loop.
         """
-        # Local variables
+        # Local variables to share data between phases
         software_found = []
         
         # -----------------------------------------------------
         # PHASE 1: CVE Database Sync (The "Update" Step)
         # -----------------------------------------------------
+        # Synchronizes local definitions with NIST NVD.
         if self.is_cat('software') and not self.skip_cve_sync:
             try:
                 self.progress.emit("Syncing CVE Database (NIST)...")
+                # This is a network-bound blocking call
                 self.vuln_engine.sync_cves() 
-                # time.sleep(0.1) allows the Event Loop to process pending signals
+                
+                # Yield control briefly (Good citizenship in threading)
                 time.sleep(0.1) 
             except Exception as e:
                 logging.error(f"CVE Sync Failed: {e}")
@@ -165,19 +170,24 @@ class ScanWorker(QThread):
         # -----------------------------------------------------
         # PHASE 2: Software Inventory (The "Asset Discovery")
         # -----------------------------------------------------
+        # Identifies what is installed on the machine.
         if self.is_cat('software'):
             try:
                 self.progress.emit("Scanning Installed Software...")
                 software_found = self.inventory_mgr.get_installed_software()
                 logging.info(f"Scan Progress: Found {len(software_found)} applications.")
                 
-                # Construct Bulk Queries
+                # Construct Bulk Queries for Database Insert
+                # Step A: Clear existing data (Snapshot model)
                 ops = [("DELETE FROM installed_software", ())] 
+                
+                # Step B: Insert new data
                 for sw in software_found:
                     ops.append((
                         "INSERT INTO installed_software (name, version, publisher, install_date, icon_path, latest_version, update_available) VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (sw['name'], sw['version'], sw['publisher'], sw['install_date'], sw['icon_path'], sw.get('latest_version', ''), sw.get('update_available', 0))
                     ))
+                # Step C: Commit Transaction
                 self._track_and_execute("installed_software", "Software", ops, len(software_found))
             except Exception as e:
                 logging.error(f"Software Scan Failed: {e}")
@@ -186,10 +196,13 @@ class ScanWorker(QThread):
         # -----------------------------------------------------
         # PHASE 3: Network Connections (The "Activity")
         # -----------------------------------------------------
+        # Identifies active communication sockets.
         if self.is_cat('network'):
             try:
                 self.progress.emit("Scanning Active Connections...")
                 connections = self.network_mgr.scan_connections()
+                
+                # Prepare replacement transaction
                 ops = [("DELETE FROM telemetry_network", ())]
                 for c in connections:
                      ops.append((
@@ -203,10 +216,13 @@ class ScanWorker(QThread):
         # -----------------------------------------------------
         # PHASE 4: Network Exposure (The "Attack Surface")
         # -----------------------------------------------------
+        # Identifies listening ports open to the outside.
         if self.is_cat('exposure'):
             try:
                 self.progress.emit("Scanning Listening Services...")
                 services = self.network_mgr.get_listening_ports()
+                
+                # Prepare replacement transaction
                 ops = [("DELETE FROM exposed_services", ())]
                 for svc in services:
                     ops.append((
@@ -220,12 +236,14 @@ class ScanWorker(QThread):
         # -----------------------------------------------------
         # PHASE 5: Identity & Persistence (The "Foothold")
         # -----------------------------------------------------
+        # Scans for malware persistence mechanisms.
         if self.is_cat('persistence'):
             try:
                 self.progress.emit("Scanning Persistence Items...")
                 # We reuse SoftwareManager which has the persistence logic
-                # (Refactoring Note: Ideally this should be in a PersistenceManager)
                 startup = self.inventory_mgr.get_startup_items()
+                
+                # Prepare replacement transaction
                 ops = [("DELETE FROM startup_items", ())]
                 for s in startup:
                     ops.append((
@@ -244,6 +262,7 @@ class ScanWorker(QThread):
             try:
                 if software_found: 
                     self.progress.emit("Matching Vulnerabilities...")
+                    # CPU-bound Logic: String Matching Loop
                     matches = self.vuln_engine.match_vulnerabilities(software_found)
                     
                     # Store matches in DB
@@ -293,6 +312,7 @@ class ProcessWorker(QThread):
         self.running = True
 
     def run(self):
+        """Infinite loop to poll process stats."""
         while self.running:
             try:
                 data = self.monitor.get_running_processes()
@@ -301,13 +321,16 @@ class ProcessWorker(QThread):
                 logging.error(f"ProcessWorker Crash: {e}", exc_info=True)
             
             # We sleep in short bursts to allow for responsive 'stop()'
-            for _ in range(50): # 5 seconds total (50 * 0.1s)
+            # Using 50 x 0.1s sleeps means we check 'running' flag every 0.1s
+            # instead of blocking for 5 seconds blindly.
+            for _ in range(50): 
                 if not self.running: return
                 time.sleep(0.1)
 
     def stop(self):
+        """Sets flag to exit the loop gracefully."""
         self.running = False
-        self.wait()
+        self.wait() # Wait for thread to actually finish
 
 # ------------------------------------------------------------------------------
 # CLASS: AIWorker
@@ -315,7 +338,7 @@ class ProcessWorker(QThread):
 class AIWorker(QThread):
     """
     Asynchronous worker for calling LLMs (Generative AI).
-    Network Latency: 2-10 seconds.
+    Network Latency for AI is often 2-10 seconds, which freezes UI if synchronous.
     """
     result = pyqtSignal(str) 
     
@@ -325,8 +348,9 @@ class AIWorker(QThread):
         self.assistant = AIAssistant()
 
     def run(self):
-        # Blocking HTTP/gRPC call handled here
+        # Blocking HTTP/gRPC call handled here in background
         response = self.assistant.explain_risk(self.context_data)
+        # Return result to UI via Signal
         self.result.emit(response)
 
 # ------------------------------------------------------------------------------
@@ -348,8 +372,11 @@ class AdvisoryWorker(QThread):
 
     def run(self):
         try:
+            # Call the crawler module
             feed = advisory_feed.fetch_advisories(limit=self.limit, start_index=self.start_index)
+            
             for item in feed:
+                # Store in DB
                 self.db.upsert_advisory(item)
                 self.progress.emit(f"Processed advisory: {item.get('title', 'Unknown')}")
             
@@ -364,23 +391,28 @@ class AdvisoryWorker(QThread):
 class FIMEventHandler(FileSystemEventHandler):
     """
     The interface between low-level OS events and our High-Level Logic.
+    Inherits from watchdog's generic handler.
     """
     def __init__(self, signal):
         self.signal = signal
 
     def on_modified(self, event):
+        """Triggered when file content changes."""
         if not event.is_directory:
             self._emit_alert(event.src_path, "MODIFIED", "HIGH")
 
     def on_created(self, event):
+        """Triggered when new file appears."""
         if not event.is_directory:
             self._emit_alert(event.src_path, "CREATED", "MEDIUM")
 
     def on_deleted(self, event):
+        """Triggered when file removes."""
         if not event.is_directory:
             self._emit_alert(event.src_path, "DELETED", "HIGH")
             
     def _emit_alert(self, path, action, severity):
+        """Constructs and fires the alert dictionary."""
         data = {
             "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "file_path": path,
@@ -403,8 +435,9 @@ class FIMWorker(QThread):
 
     def run(self):
         # Paths to monitor (Honeypots + Critical Areas)
+        # Windows: System32 hosts file is a prime target
         paths = [
-            r"C:\Windows\System32\drivers\etc", # Hosts file
+            r"C:\Windows\System32\drivers\etc", 
             os.path.join(os.path.expanduser("~"), "Downloads") # User downloads
         ]
         
@@ -413,6 +446,7 @@ class FIMWorker(QThread):
         for path in paths:
             if os.path.exists(path):
                 try:
+                    # 'recursive=False' because we only care about top-level files here
                     self.observer.schedule(handler, path, recursive=False)
                     logging.info(f"FIM monitoring started for: {path}")
                 except Exception as e:
@@ -421,10 +455,14 @@ class FIMWorker(QThread):
                 logging.warning(f"FIM path not found: {path}")
 
         try:
+            # Start the watchdog thread (nested thread)
             self.observer.start()
-            # Keep thread alive
+            
+            # Keep QThread alive with a loop
             while self.running:
                 time.sleep(1)
+            
+            # Cleanup on exit
             self.observer.stop()
             self.observer.join()
         except Exception as e:
@@ -457,6 +495,7 @@ class YaraScanWorker(QThread):
             if os.path.isfile(self.scan_path):
                  self.scan_single_file(self.scan_path, results)
             else:
+                 # Recursive Directory Walk (DFS)
                  for root, dirs, files in os.walk(self.scan_path):
                      if not self.running: break
                      for file in files:
@@ -470,6 +509,7 @@ class YaraScanWorker(QThread):
         self.finished.emit()
 
     def scan_single_file(self, path, results):
+        """Helper to scan one file and append matches."""
         self.progress.emit(f"Scanning: {path}")
         matches = self.yara_mgr.scan_file(path)
         if matches:

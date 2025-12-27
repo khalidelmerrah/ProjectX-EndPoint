@@ -38,39 +38,49 @@ SECURITY CONSIDERATIONS:
 
 2.  **Input Sanitization**:
     We assume external XML/HTML is "tainted". We strip scripts/tags before 
-    displaying to the user to prevent XSS (Cross-Site Scripting) in our own UI.
+    displaying to the user to prevent XSS (Cross-Site Scripting).
 
 3.  **Politeness (Rate Limiting)**:
-    We implement a caching mechanism (`should_fetch`). If we downloaded the full 
-    HTML details for an advisory recently (< 7 days), we skip the network call. 
-    This prevents us from being blocked by the vendor's WAF (Web Application Firewall).
+    We implement a caching mechanism. If we downloaded the full HTML details 
+    recently, we skip the network call to avoid WAF blocking.
 
 """
 
 import requests                     # The de-facto standard HTTP library for Python
 import xml.etree.ElementTree as ET  # Built-in XML parser (Lightweight, C-optimized)
 from dateutil import parser         # Robust date parsing (handles ISO, RFC, etc.)
-from datetime import datetime       # Time manipulation
+from datetime import datetime       # Time manipulation class
 import re                           # Regular Expressions (Pattern Matching)
-import logging                      # Event logging
-import sys                          # System parameters
-import os                           # OS Interface
+import logging                      # Event logging for debugging
+import sys                          # System parameters (sys.path, sys.frozen)
+import os                           # Operating System Interface
 
 # ------------------------------------------------------------------------------
-# DYNAMIC PATH RESOLUTION
+# DYNAMIC PATH RESOLUTION & IMPORT HACKS
 # ------------------------------------------------------------------------------
 # This module lives in 'backend/', but needs 'db_manager' from the root.
-# Python doesn't look in parent directories by default. We modify sys.path.
-# SECURITY NOTE: In a packaged app, relative imports are safer, but this is a 
-# standard hack for standalone script execution.
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
+# We must ensure proper import resolution for both source and frozen modes.
 
+def get_base_path():
+    """Returns the base application path (Source or Frozen)."""
+    # Check if running as a PyInstaller bundle
+    if getattr(sys, 'frozen', False):
+        return getattr(sys, '_MEIPASS', os.getcwd())
+    else:
+        # If running from source, go up one level from 'backend/'
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Add the application root to sys.path to enable importing root modules
+base_path = get_base_path()
+if base_path not in sys.path:
+    # Append to path so 'import db_manager' works
+    sys.path.append(base_path)
+
+# Attempt to import the database manager
 try:
     import db_manager as database
 except ImportError:
+    # Log failure but do not crash; degrade functionality instead
     logging.error("Failed to import db_manager. Caching features disabled.")
     database = None
 
@@ -81,6 +91,7 @@ except ImportError:
 ADVISORY_FEED_URL = "https://www.watchguard.com/wgrd-psirt/advisories.xml"
 
 # We spoof the User-Agent to identify ourselves responsibly to the server logs.
+# Some servers block generic "requests/x.y.z" agents.
 HEADERS = {
     "User-Agent": "ProjectX-SecurityScanner/1.0 (Educational Purposes)"
 }
@@ -95,22 +106,20 @@ def extract_metadata_from_html(html_content: str) -> dict:
     
     Why: RSS feeds often provide only a snippet. The "Meat" (CVE IDs, active 
     exploits) is usually on the full webpage.
-    
-    technique: Regex Scraping (Lightweight) vs BeautifulSoup (Heavy).
-    For simple extraction, Regex is faster and adds no external dependency.
     """
     meta = {
-        "cve_ids": [],
-        "products": [],
-        "html_title": "",
-        "html_description": ""
+        "cve_ids": [],          # List to hold CVE identifiers
+        "products": [],         # List to hold affected products
+        "html_title": "",       # Scraped Page Title
+        "html_description": ""  # Scraped Meta Description
     }
     
     try:
-        # 1. Extract Page Title
-        # <title>WatchGuard Firebox Auth Bypass...</title>
+        # 1. Extract Page Title using Regex
+        # Matches <title>...</title>, non-greedy, case-insensitive
         title_match = re.search(r'<title>(.*?)</title>', html_content, re.IGNORECASE)
         if title_match:
+            # Strip whitespace and store
             meta["html_title"] = title_match.group(1).strip()
             
         # 2. Extract Meta Description (Summary)
@@ -119,12 +128,13 @@ def extract_metadata_from_html(html_content: str) -> dict:
             meta["html_description"] = desc_match.group(1).strip()
             
         # 3. Extract CVE IDs using Pattern Matching
-        # Pattern: CVE-YYYY-NNNN... (e.g., CVE-2024-1234)
+        # Pattern: CVE-YYYY-NNNN... (Four digits for year, 4-7 digits for ID)
         cves = re.findall(r'CVE-\d{4}-\d{4,7}', html_content)
-        # De-duplicate using set()
+        # De-duplicate the list using set(), then convert back to list
         meta["cve_ids"] = list(set(cves)) 
         
     except Exception as e:
+        # Log parsing errors but return partial data if possible
         logging.error(f"HTML Parsing Error: {e}")
         
     return meta
@@ -134,23 +144,29 @@ def fetch_advisory_metadata(link: str) -> dict:
     Performs the HTTP GET for the detail page.
     Wrapper around requests.get with error handling and timeouts.
     """
+    # Validation: Ensure link is valid HTTP
     if not link or not link.startswith("http"):
         return {}
         
     try:
         logging.info(f"Crawling detail page: {link}")
+        # Perform GET request with timeout to avoid hanging threads
         response = requests.get(link, headers=HEADERS, timeout=10)
         
         if response.status_code == 200:
+            # If successful, pass content to the scraper
             return extract_metadata_from_html(response.text)
         elif response.status_code == 404:
+            # Handle broken links gracefully
             logging.warning(f"Advisory page not found (404): {link}")
         else:
             logging.warning(f"HTTP Error {response.status_code} for {link}")
             
     except requests.Timeout:
+        # Specific handling for timeouts
         logging.error(f"Timeout fetching {link}")
     except Exception as e:
+        # Catch-all for other network errors (DNS, reset, etc.)
         logging.error(f"Network failure for {link}: {e}")
         
     return {}
@@ -165,39 +181,46 @@ def fetch_advisories(limit=50, start_index=0) -> list:
     
     Orchestrates the Fetch -> Parse -> Cache Check -> Return flow.
     Called by 'workers.py' inside a QThread.
+    
+    Args:
+        limit (int): Max number of items to process.
+        start_index (int): Pagination offset.
     """
     try:
         logging.info("Starting Feed Ingestion...")
         
         # STEP 1: Fetch the XML Feed
+        # Connect to the main RSS/XML endpoint
         response = requests.get(ADVISORY_FEED_URL, headers=HEADERS, timeout=15)
         if response.status_code != 200:
             logging.error(f"Feed unreachable: {response.status_code}")
             return []
             
         # STEP 2: Parse XML Tree
-        # Security Note: ET.fromstring is vulnerable to "Billion Laughs" attack 
-        # (XML Bombs) if parsing untrusted user uploads. For a vendor feed, risk is low.
+        # Security Note: ET.fromstring is vulnerable to XML Bombs.
+        # However, we trust the vendor source 'watchguard.com'.
         root = ET.fromstring(response.content)
         
         advisories = []
         
-        # Traverse the XML structure (Channel -> Item)
+        # Traverse the XML structure (Channel -> Item) standard format
         items = root.findall('./channel/item')
         if not items:
-            items = root.findall('.//item') # Fallback recursive search
+            # Fallback recursive search if structure differs
+            items = root.findall('.//item') 
             
         count = 0
         
-        # STEP 3: Iterate and Normalize
+        # STEP 3: Iterate and Normalize Data
         for index, item in enumerate(items):
-            # Pagination
+            # Apply Pagination Logic
             if index < start_index: continue
             if count >= limit: break
                 
-            # Safe Extraction (Handle missing tags gracefully)
+            # Helper to extract text safely (handling None types)
             get_text = lambda tag: item.find(tag).text if item.find(tag) is not None else ""
             
+            # Extract basic RSS fields
             title = get_text('title') or "No Title"
             link = get_text('link') or "#"
             description = get_text('description')
@@ -210,12 +233,14 @@ def fetch_advisories(limit=50, start_index=0) -> list:
             
             if not advisory_id:
                 # Heuristic ID generation if official ID missing
+                # Use URL slug or Title Hash
                 if link and link != "#":
                     advisory_id = link.rstrip('/').split('/')[-1]
                 else:
                     advisory_id = f"unknown-{hash(title)}"
             
-            # Extract CVSS Metrics
+            # Extract CVSS Metrics from Description HTML
+            # Look for "CVSS Score</div>...<div>7.5</div>" pattern
             cvss_match = re.search(r'CVSS Score</div>\s*<div[^>]*>([0-9\.]+)</div>', description)
             severity = float(cvss_match.group(1)) if cvss_match else 0.0
             
@@ -225,24 +250,31 @@ def fetch_advisories(limit=50, start_index=0) -> list:
             vector_match = re.search(r'CVSS Vector</div>\s*<div[^>]*>([^<]+)</div>', description)
             cvss_vector = vector_match.group(1) if vector_match else ""
             
-            # Extract Date
+            # Extract Publication Date
             pub_date = datetime.now()
+            # Often hidden in HTML attributes
             date_match = re.search(r'datetime="([^"]+)"', description)
             if date_match:
-                 try: pub_date = parser.parse(date_match.group(1))
+                 try: 
+                     # Parse date string to datetime object
+                     pub_date = parser.parse(date_match.group(1))
                  except: pass
             
             # Sanitization (Strip HTML for safe preview)
+            # Remove all tags using regex
             clean_desc = re.sub(r'<[^>]+>', '', description)
+            # Collapse whitespace
             clean_desc = re.sub(r'\s+', ' ', clean_desc).strip()
+            # Truncate for UI preview
             preview_desc = (clean_desc[:250] + "...") if len(clean_desc) > 250 else clean_desc
             
             # --- Caching Optimization ---
-            # Do we need to crawl the full page?
+            # Determine if we need to crawl the detailed page
             should_fetch = True
             extra_meta = {}
             
             if database:
+                # Check DB for existing record
                 existing = database.get_advisory_by_link(link)
                 if existing:
                     last_fetched = existing.get('html_fetched_at')
@@ -254,11 +286,13 @@ def fetch_advisories(limit=50, start_index=0) -> list:
                                 should_fetch = False
                         except: pass
             
+            # Fetch metadata if not cached
             if should_fetch and link.startswith("http"):
                 extra_meta = fetch_advisory_metadata(link)
+                # Timestamp the fetch
                 extra_meta['html_fetched_at'] = datetime.now()
             
-            # Assemble Record
+            # Assemble Final Record Dictionary
             advisory_data = {
                 "advisory_id": advisory_id,
                 "title": title,
@@ -269,6 +303,7 @@ def fetch_advisories(limit=50, start_index=0) -> list:
                 "impact": impact,
                 "cvss_vector": cvss_vector,
                 "vendor": "WatchGuard",
+                # Flatten lists to CSV strings for DB
                 "cve_ids": ",".join(extra_meta.get("cve_ids", [])),
                 "products": ",".join(extra_meta.get("products", [])),
                 "summary": extra_meta.get("html_description", ""),
@@ -284,11 +319,12 @@ def fetch_advisories(limit=50, start_index=0) -> list:
         return advisories
 
     except Exception as e:
+        # Catch critical errors to prevent crash
         logging.error(f"Critical Crawler Error: {e}")
         return []
 
 if __name__ == "__main__":
-    # Test Harness
+    # Test Harness: Run module directly to debug
     logging.basicConfig(level=logging.INFO)
     print("Running crawler directly...")
     results = fetch_advisories(limit=5)

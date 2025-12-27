@@ -224,7 +224,7 @@ class LoaderScreen(QSplashScreen):
         # We use this because we don't know exactly how many seconds the scan will take.
         self.progress.setRange(0, 0) 
         layout.addWidget(self.progress)
-
+        
         # Final Polish: Center the splash screen on the user's primary monitor.
         self.center_on_screen()
 

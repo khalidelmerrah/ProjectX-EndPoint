@@ -12,54 +12,39 @@ PYTHON VER:     3.11+
 MODULE OVERVIEW:
 ----------------
 This module contains the **Business Logic Layer** (the "Brain") of the application.
-It follows the **Service-Oriented Architecture (SOA)** pattern, where distinct
-functionalities (Inventory, Vulnerability Ops, Threat Intel) are encapsulated 
-in separate "Manager" classes.
+It follows the **Service-Oriented Architecture (SOA)** pattern, ensuring strict
+separation of concerns. Each critical function (Inventory, Vulerability Ops,
+Threat Intelligence) is encapsulated in its own distinct "Manager" class.
 
 DESIGN PATTERNS IMPLEMENTED:
 ----------------------------
 1.  **Singleton / Monostate**:
-    While not strictly enforced via `__new__`, these classes are designed to be 
-    instantiated once and shared (conceptually) or are stateless enough to be 
-    transient.
+    Classes are designed to be instantiated once or share state implicitly,
+    ensuring consistent access to resources like configuration.
 
 2.  **Chain of Responsibility (Fallback Logic)**:
-    In `SoftwareManager`, we see a critical resilience pattern. The system attempts 
-    to fetch data from the most reliable source (OSQuery). If that fails (e.g., 
-    binary missing), it degrades gracefully to Windows Registry scans, and finally 
-    to WMI (Windows Management Instrumentation). 
-    *Principle: Security tools must function even in broken environments.*
+    In `SoftwareManager`, the system demonstrates resilience. It attempts to
+    query utilizing the most reliable source (OSQuery). If unavailable, it
+    degrades gracefully to the Windows Registry, and finally to WMI.
 
 3.  **Sidecar Pattern (OSQuery Integration)**:
-    ProjectX does not re-invent the wheel. It leverages `osqueryi.exe` as a 
-    powerful subprocess ("Sidecar") to query the OS like a database. 
-    This decouples the "Data Collection" (C++) from the "Analysis" (Python).
+    The application leverages `osqueryi.exe` as a subprocess "Sidecar".
+    This decouples the heavy C++ data collection from the Python analysis layer.
 
 4.  **Secure Configuration Management**:
-    The `ConfigManager` prioritizes OS-level Keychains (Windows Credential Locker) 
-    over plaintext files for storing sensitive API keys. This is a baseline 
-    requirement for any security software.
-
-KEY COMPONENTS:
----------------
--   `ConfigManager`: Handles persistence of settings and secrets (Keyring).
--   `OSQueryClient`: Wrapper for IPC (stdIO) with the OSQuery table explorer.
--   `SoftwareManager`: Aggregates software inventory from multiple sources.
--   `VulnEngine`: Correlates inventory with NIST NVD CVE data (the "Matcher").
--   `YaraManager`: Compiles and executes YARA rules for signature matching.
--   `AIAssistant`: Connects to LLMs (Gemini) to explain alerts to users.
--   `ResponseManager`: Active defense capabilities (Kill Process, Firewall Block).
+    `ConfigManager` prioritizes the OS-level Keyring over plaintext files,
+    demonstrating proper secrets management.
 
 """
 
 import sys          # System-specific parameters and functions
-import os           # Operating system interfaces (Paths, FS)
-import subprocess   # Spawning new processes, connecting to input/output pipes
-import json         # JSON encoder and decoder
-import logging      # Event logging system
+import os           # Operating system interfaces (Paths, Filesystem)
+import subprocess   # Spawning new processes and connecting to pipes
+import json         # JSON data encoding and decoding
+import logging      # Event logging system for auditing and debugging
 import platform     # Access to underlying platform's identifying data
-import datetime     # Basic date and time types
-import hashlib      # Secure hash and message digest algorithms
+import datetime     # Basic date and time types for timestamps
+import hashlib      # Secure hash algorithms (SHA256)
 import socket       # Low-level networking interface
 from typing import List, Dict, Any, Optional
 from dateutil import parser # Robust date parsing library
@@ -67,14 +52,14 @@ from dateutil import parser # Robust date parsing library
 # ------------------------------------------------------------------------------
 # THIRD-PARTY DEPENDENCIES
 # ------------------------------------------------------------------------------
-# We adhere to "Defensive Importing". 
-# If a non-critical library is missing, we catch the import error and disable 
-# the feature rather than crashing the entire application.
+# We adhere to "Defensive Importing". If a library is missing, we catch the
+# error and disable the feature rather than crashing.
 
 # PSUTIL: Cross-platform process and system monitoring
 try:
     import psutil
 except ImportError:
+    # Log a critical error if the core system monitoring library is missing
     logging.critical("CRITICAL: 'psutil' library missing. System monitoring disabled.")
     psutil = None
 
@@ -82,20 +67,23 @@ except ImportError:
 try:
     import requests
 except ImportError:
+    # Requests is essential for Threat Intel (VirusTotal/NIST).
     logging.critical("CRITICAL: 'requests' library missing. Cloud features disabled.")
     requests = None
 
-# KEYRING: Secure Password Storage (Windows Credential Manager / macOS Keychain)
+# KEYRING: Secure Password Storage
 try:
     import keyring
 except ImportError:
-    logging.warning("WARNING: 'keyring' not found. API keys will verify insecurely if not handled.")
+    # Fallback to insecure storage if Keyring is absent (e.g., CI/CD)
+    logging.warning("WARNING: 'keyring' not found. API keys will verify insecurely.")
     keyring = None
 
-# YARA: The pattern matching swiss knife for malware researchers
+# YARA: Pattern matching for malware identification
 try:
     import yara
 except ImportError:
+    # Disable signature scanning if the YARA binding is missing
     logging.warning("WARNING: 'yara-python' not found. Signature scanning disabled.")
     yara = None
 
@@ -103,14 +91,33 @@ except ImportError:
 try:
     import wmi
 except ImportError:
-    # This is expected on Linux/macOS
+    # This is expected on non-Windows platforms (Linux/macOS)
     logging.info("INFO: 'wmi' module not found (Non-Windows or missing).")
     wmi = None
 
 # ------------------------------------------------------------------------------
+# UTILITY: Path Resolution
+# ------------------------------------------------------------------------------
+def get_resource_path(relative_path: str) -> str:
+    """
+    Resolves the absolute path to a resource, working for both development
+    and PyInstaller frozen builds.
+    
+    Args:
+        relative_path (str): The relative path to the file (e.g., 'config.json').
+        
+    Returns:
+        str: The absolute filesystem path.
+    """
+    # PyInstaller creates a temp folder and stores path in _MEIPASS
+    base_path = getattr(sys, '_MEIPASS', os.getcwd())
+    return os.path.join(base_path, relative_path)
+
+# ------------------------------------------------------------------------------
 # CONSTANTS & CONFIGURATION
 # ------------------------------------------------------------------------------
-CONFIG_FILE = "config.json"       # Stored in the application root
+# Use the safe path resolver for the configuration file
+CONFIG_FILE = get_resource_path("config.json")
 SERVICE_NAME = "ProjectX_Secure" # Namespace for Keyring storage
 
 # ------------------------------------------------------------------------------
@@ -120,23 +127,27 @@ class ConfigManager:
     """
     Manages application configuration and sensitive secrets.
     
-    Security Principle: Separation of Secrets.
-    Non-sensitive configuration (UI themes, boolean flags) goes into a JSON file.
-    Sensitive secrets (API Keys) go into the OS Secure Storage (Keyring).
+    Architecture Note:
+    We separate non-sensitive config (UI themes) from secrets (API Keys).
+    Secrets are stored in the OS Keyring, while Config is in JSON.
     """
 
     @staticmethod
     def load_config() -> Dict[str, Any]:
         """
         Loads the JSON configuration file from disk.
-        Returns empty dict if file is missing or corrupt.
+        Returns an empty dictionary if the file is missing or corrupt.
         """
+        # check if file exists using the resolved path
         if not os.path.exists(CONFIG_FILE):
              return {}
         try:
+            # Open the file in read mode
             with open(CONFIG_FILE, 'r') as f:
+                # Parse JSON content into a Python dictionary
                 return json.load(f)
         except json.JSONDecodeError as e:
+            # Handle corrupted JSON gracefully
             logging.error(f"Config corruption detected: {e}")
             return {}
 
@@ -146,12 +157,15 @@ class ConfigManager:
         Persists the JSON configuration to disk.
         
         Args:
-            data (dict): The configuration dictionary.
+            data (dict): The configuration dictionary to save.
         """
         try:
+            # Open the file in write mode
             with open(CONFIG_FILE, 'w') as f:
-                json.dump(data, f, indent=4) # Indent for human readability
+                # Dump dictionary to JSON with indentation for readability
+                json.dump(data, f, indent=4)
         except IOError as e:
+            # Log IO errors (permissions, disk full)
             logging.error(f"Failed to write config: {e}")
 
     @staticmethod
@@ -159,40 +173,47 @@ class ConfigManager:
         """
         Securely stores a secret using the OS Keyring.
         
-        Why Keyring?
-        Storing API keys in `config.json` is a security vulnerability.
-        Malware exfiltrating files would steal the keys. 
-        Keyring encrypts them using the User's Windows Login credentials.
+        Security Logic:
+        Storing API keys in `config.json` exposes them to malware.
+        Keyring encrypts them using the User's OS login credentials.
         """
         if keyring:
             try:
+                # Store the password securely
                 keyring.set_password(service, username, password)
             except Exception as e:
                 logging.error(f"Keyring Write Error: {e}")
         else:
-            # Fallback for environments without keyring (e.g., some CI runners)
-            # CAUTION: This is insecure, but necessary for compatibility.
+            # Fallback (Insecure) for environments without Keyring
+            # This is technical debt accepted for compatibility.
             config = ConfigManager.load_config()
             config[f"{service}_{username}"] = password
             ConfigManager.save_config(config)
 
     @staticmethod
     def get_key(service: str, username: str) -> str:
-        """Retrieves a secret from the OS Keyring."""
+        """
+        Retrieves a secret from the OS Keyring.
+        """
         if keyring:
             try:
+                # Retrieve the password securely
                 val = keyring.get_password(service, username)
                 return val if val else ""
             except Exception:
                 return ""
         else:
+            # Fallback retrieval from JSON
             config = ConfigManager.load_config()
             return config.get(f"{service}_{username}", "")
 
     # Convenience Wrappers for Specific API Keys
     def get(self, key: str, default: Any = None):
-        """Facade for retrieving values, abstracting the storage backend."""
-        # 1. Check Keyring for known secrets
+        """
+        Facade pattern for retrieving configuration values.
+        Abstracts the difference between Keyring and JSON storage.
+        """
+        # 1. Check Keyring for known sensitive keys first
         if key == "nist_api_key":
             val = self.get_key(SERVICE_NAME, "nist_api_key")
             if val: return val
@@ -203,7 +224,7 @@ class ConfigManager:
              val = self.get_key(SERVICE_NAME, "gemini_api_key")
              if val: return val
              
-        # 2. Check JSON Config
+        # 2. Check JSON Config for standard settings
         cfg = self.load_config()
         return cfg.get(key, default)
 
@@ -217,7 +238,6 @@ class OSQueryClient:
     Architecture:
     OSQuery acts as a "Sidecar" process. We spawn it in interactive mode (`-i`)
     and communicate via Standard Input/Output (stdin/stdout).
-    This allows us to treat the Operating System as a Relational Database (SQL).
     """
     
     def __init__(self):
@@ -227,15 +247,13 @@ class OSQueryClient:
         # ----------------------------------------------------------------------
         # PATH INTEGRITY & PYINSTALLER COMPATIBILITY
         # ----------------------------------------------------------------------
-        # When compiling to a standalone EXE (Frozen), external assets like binaries
-        # are unpacked into a temporary temp folder (`sys._MEIPASS`).
-        # We must detect this to find `osqueryi.exe`.
+        # Resolving the path to the bundled binary is critical in frozen/compiled apps.
+        # We use the unified logic: get_resource_path
         
         if getattr(sys, 'frozen', False):
             # APP IS FROZEN (Running as EXE)
-            base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-            # We bundled osqueryi.exe in the 'bin' submenu of the bundle.
-            bundled_path = os.path.join(base_path, 'bin', 'osqueryi.exe')
+            # The 'bin' folder is bundled at the root of the temp _MEIPASS directory
+            bundled_path = get_resource_path(os.path.join('bin', 'osqueryi.exe'))
             
             if os.path.exists(bundled_path):
                 self.binary_path = bundled_path
@@ -248,7 +266,7 @@ class OSQueryClient:
         # ----------------------------------------------------------------------
         # DEVELOPMENT MODE (Running from Source)
         # ----------------------------------------------------------------------
-        # Check local 'bin' folder first
+        # Check local 'bin' folder relative to CWD
         local_bin = os.path.join(os.getcwd(), 'bin', 'osqueryi.exe')
         if os.path.exists(local_bin):
             self.binary_path = local_bin
@@ -256,7 +274,7 @@ class OSQueryClient:
             logging.info(f"OSQuery (Local) found at: {local_bin}")
             return
             
-        # Check System PATH as fallback
+        # Check System PATH as final fallback
         try:
             # We use '--version' as a lightweight "Ping" to check existence
             subprocess.run([self.binary_path, "--version"], 
@@ -269,29 +287,23 @@ class OSQueryClient:
 
     def query(self, sql: str) -> List[Dict[str, Any]]:
         """
-        Executes a SQL query against the OS.
-        
-        Args:
-            sql (str): SQL statement (e.g. "SELECT * FROM users")
-            
-        Returns:
-            List[Dict]: A list of dictionaries representing the rows.
+        Executes a SQL query against the OS using the subprocess.
         """
         if not self.available:
             return []
             
         try:
             # EXECUTION STRATEGY:
-            # We pass the SQL query and request JSON output format.
-            # timeout=10 prevents hanging if OSQuery freezes.
+            # Pass SQL query via CLI arguments requesting JSON output
             cmd = [self.binary_path, "--json", sql]
             
-            # Windows: Hide the console window for the subprocess
+            # Windows: Hide the console window to prevent popping up terminals
             startupinfo = None
             if platform.system() == "Windows":
                  startupinfo = subprocess.STARTUPINFO()
                  startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             
+            # Run the command with a timeout to prevent hanging
             result = subprocess.run(
                 cmd, 
                 capture_output=True, 
@@ -302,6 +314,7 @@ class OSQueryClient:
             
             if result.returncode == 0:
                 try:
+                    # Parse and return JSON output
                     return json.loads(result.stdout)
                 except json.JSONDecodeError:
                     return []
@@ -323,14 +336,13 @@ class SoftwareManager:
     Aggregates installed software inventory.
     
     Pattern: Chain of Responsibility / Fallback
-    It tries the best source (OSQuery) first. If that fails or is missing,
-    it falls back to native Python libraries (psutil, winreg, WMI).
+    It tries the best source (OSQuery) first, then Registry, then WMI.
     """
     
     def get_installed_software(self) -> List[Dict[str, Any]]:
         """
         Returns a list of installed applications.
-        Critical for Vulnerability Management (Search installed apps vs NVD).
+        Critical for Vulnerability Management functionality.
         """
         software_list = []
         
@@ -359,7 +371,6 @@ class SoftwareManager:
         # ----------------------------------------------------------------------
         # METHOD B: Windows Registry (The "Classic" Manual Method)
         # ----------------------------------------------------------------------
-        # Windows stores uninstall strings in HKLM and HKCU hives.
         try:
             import winreg
             logging.info("Scanning Windows Registry for Software...")
@@ -422,7 +433,7 @@ class SoftwareManager:
         # ----------------------------------------------------------------------
         # METHOD C: WMI (Last Resort - Very Slow)
         # ----------------------------------------------------------------------
-        # querying Win32_Product is discouraged by Microsoft (can trigger MSI self-repair).
+        # querying Win32_Product is discouraged (can trigger MSI self-repair).
         if wmi:
             try:
                 logging.info("Falling back to WMI for Software Inventory...")
@@ -490,8 +501,7 @@ class SoftwareManager:
             "disk": []
         }
         try:
-            # CPU
-            # interval=None makes it non-blocking (returns immediate last val)
+            # CPU: interval=None makes it non-blocking
             health["cpu"]["percent"] = psutil.cpu_percent(interval=None) 
             health["cpu"]["count"] = psutil.cpu_count(logical=True)
             
@@ -966,10 +976,6 @@ class VulnEngine:
         """
         Cross-references installed software with the CVE cache.
         Algorithm: Naive String Matching (O(N*M)).
-        
-        Optimization Note:
-        In a production system, CPE (Common Platform Enumeration) matching would be used.
-        Here, we fuzzy match the software name inside the CVE description for simplicity.
         """
         matches = []
         if not self.cached_cves:
@@ -1001,6 +1007,9 @@ class YaraManager:
     """
     def __init__(self, rules_dir="rules"):
         self.rules = None
+        # Adjust rules_dir for PyInstaller? 
+        # Usually users define rules locally in a known folder, or we bundle default rules.
+        # For this exercise, we assume local rules in CWD.
         self.rules_dir = rules_dir
         self.compile_rules()
 

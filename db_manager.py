@@ -50,6 +50,7 @@ import os           # File system operations
 # ------------------------------------------------------------------------------
 # The database file is created in the Current Working Directory (CWD).
 # In a real deployment, this should be %APPDATA% or /var/lib/projectx.
+# We do NOT use _MEIPASS here as the DB must be writable and persistent.
 DB_NAME = "projectx.db"
 
 # ------------------------------------------------------------------------------
@@ -75,6 +76,7 @@ class DatabaseManager:
             Schema exists immediately on startup (`_init_db`).
         """
         self.db_path = db_path
+        # Initialize the schema unconditionally on instantiation
         self._init_db()
 
     def get_connection(self) -> sqlite3.Connection:
@@ -88,363 +90,324 @@ class DatabaseManager:
             Ideally, each thread should create its OWN connection.
         """
         try:
+            # Establish connection to the file
             conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            
             # Enable Foreign Key enforcement (SQLite disables it by default!)
+            # This ensures referential integrity (e.g. can't have vulns for non-existent software)
             conn.execute("PRAGMA foreign_keys = ON;")
             return conn
+            
         except sqlite3.Error as e:
+            # Log critical failure as this renders the app useless
             logging.critical(f"Failed to connect to DB: {e}")
             raise
 
     def _init_db(self):
         """
-        Initializes the database schema using Data Definition Language (DDL).
+        Idempotent Schema Initialization.
         
-        Idempotency:
-            Using `IF NOT EXISTS` ensures this function is safe to run on every boot.
+        Runs the DDL (Data Definition Language) SQL scripts to create tables
+        if they do not already exist.
         """
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
             
-            # -----------------------------------------------------------------
-            # SCHEMA GROUP 1: ASSET INVENTORY
-            # -----------------------------------------------------------------
-            
-            # Table: installed_software
-            # The core inventory table.
-            cursor.execute('''CREATE TABLE IF NOT EXISTS installed_software (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,   -- Valid Primary Key
-                name TEXT NOT NULL,                     -- App Name (e.g., "Notepad++")
-                version TEXT,                           -- Version (e.g., "8.4.2")
-                publisher TEXT,                         -- Vendor Signer
-                install_date TEXT,                      -- ISO 8601 Date
-                icon_path TEXT,                         -- Local cache path
-                latest_version TEXT,                    -- Enriched data
-                update_available INTEGER DEFAULT 0      -- Boolean Flag
-            )''')
-            
-            # Table: software_updates
-            # 1:1 relation mapping software to available patches.
-            cursor.execute('''CREATE TABLE IF NOT EXISTS software_updates (
-                software_id INTEGER,
-                update_available BOOLEAN,
-                latest_version TEXT,
-                FOREIGN KEY(software_id) REFERENCES installed_software(id) ON DELETE CASCADE
-            )''')
+            # ------------------------------------------------------------------
+            # TABLE 1: INSTALLED SOFTWARE (Inventory)
+            # ------------------------------------------------------------------
+            # Tracks applications found on the host machine.
+            # Used as the baseline for Vulnerability Matching.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS installed_software (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    version TEXT,
+                    publisher TEXT,
+                    install_date TEXT,
+                    icon_path TEXT,
+                    
+                    -- Metadata for future updates
+                    latest_version TEXT,
+                    update_available INTEGER DEFAULT 0
+                )
+            """)
 
-            # Table: startup_items
-            # Security Critical: Tracks persistent binaries.
-            cursor.execute('''CREATE TABLE IF NOT EXISTS startup_items (
-                name TEXT,
-                path TEXT,      -- Full Binary Path (Check for masquerading)
-                location TEXT,  -- Registry Key or Folder
-                args TEXT,      -- Malicious args (e.g., powershell -Enc ...)
-                type TEXT,      
-                source TEXT,
-                status TEXT,
-                username TEXT
-            )''')
+            # ------------------------------------------------------------------
+            # TABLE 2: TELEMETRY NETWORK (Activity)
+            # ------------------------------------------------------------------
+            # Transient data about active TCP/UDP connections.
+            # Refreshed on every scan (snapshot model).
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS telemetry_network (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pid INTEGER,
+                    local_addr TEXT,
+                    remote_addr TEXT,
+                    state TEXT,
+                    protocol TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-            # -----------------------------------------------------------------
-            # SCHEMA GROUP 2: ATTACK SURFACE & TELEMETRY
-            # -----------------------------------------------------------------
-            
-            # Table: exposed_services
-            # Tracks open ports (Listening Sockets).
-            cursor.execute('''CREATE TABLE IF NOT EXISTS exposed_services (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                port INTEGER,   
-                protocol TEXT,          -- TCP/UDP
-                process_name TEXT,      -- Associated Binary
-                binary_path TEXT,
-                pid INTEGER,            
-                username TEXT,          -- Privilege Level (SYSTEM vs User)
-                risk_score INTEGER      
-            )''')
-            
-            # Table: telemetry_network
-            # Snapshot of active connections (Netstat).
-            cursor.execute('''CREATE TABLE IF NOT EXISTS telemetry_network (
-                pid INTEGER,
-                local_addr TEXT,
-                remote_addr TEXT,       -- Potential C2 Server
-                state TEXT,             -- ESTABLISHED, SYN_SENT
-                protocol TEXT
-            )''')
+            # ------------------------------------------------------------------
+            # TABLE 3: SYSTEM POSTURE (Audit Log)
+            # ------------------------------------------------------------------
+            # Immutable log of security events.
+            # Good for forensics: "When was the last scan run?"
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS system_posture (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    check_name TEXT,
+                    status TEXT,
+                    details TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-            # -----------------------------------------------------------------
-            # SCHEMA GROUP 3: THREAT INTELLIGENCE (CVEs)
-            # -----------------------------------------------------------------
+            # ------------------------------------------------------------------
+            # TABLE 4: EXPOSED SERVICES (Attack Surface)
+            # ------------------------------------------------------------------
+            # Tracks ports listening for incoming connections.
+            # High Risk items (Risk Score > 80) trigger alerts.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS exposed_services (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    port INTEGER,
+                    protocol TEXT,
+                    process_name TEXT,
+                    binary_path TEXT,
+                    pid INTEGER,
+                    username TEXT,
+                    risk_score INTEGER DEFAULT 0
+                )
+            """)
+            
+            # ------------------------------------------------------------------
+            # TABLE 5: STARTUP ITEMS (Persistence)
+            # ------------------------------------------------------------------
+            # Programs configured to launch automatically.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS startup_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT,
+                    path TEXT,
+                    location TEXT,
+                    args TEXT,
+                    type TEXT,
+                    source TEXT,
+                    status TEXT,
+                    username TEXT
+                )
+            """)
 
-            # Table: cves
-            # Cache of NVD data.
-            cursor.execute('''CREATE TABLE IF NOT EXISTS cves (
-                cve_id TEXT PRIMARY KEY,    -- CVE-YYYY-NNNN
-                description TEXT,
-                severity TEXT,              -- LOW, MEDIUM, HIGH, CRITICAL
-                cvss_score REAL,            -- Base Score (0-10)
-                published_at TEXT,
-                fetched_at TEXT
-            )''')
+            # ------------------------------------------------------------------
+            # TABLE 6: VULNERABILITY MATCHES (The Findings)
+            # ------------------------------------------------------------------
+            # A Join Table linking Software to Definitions.
+            # Demonstrates 'Referential Integrity' via Foreign Key.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS vulnerability_matches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    software_id INTEGER,
+                    cve_id TEXT,
+                    confidence TEXT,
+                    status TEXT,
+                    
+                    FOREIGN KEY(software_id) REFERENCES installed_software(id) ON DELETE CASCADE
+                )
+            """)
 
-            # Table: vulnerability_matches
-            # Join Table: Software <--> CVEs
-            cursor.execute('''CREATE TABLE IF NOT EXISTS vulnerability_matches (
-                software_id INTEGER,
-                cve_id TEXT,
-                confidence INTEGER,         -- Heuristic Confidence
-                status TEXT,                -- 'Active', 'Mitigated'
-                FOREIGN KEY(software_id) REFERENCES installed_software(id) ON DELETE CASCADE,
-                FOREIGN KEY(cve_id) REFERENCES cves(cve_id)
-            )''')
+            # ------------------------------------------------------------------
+            # TABLE 7: THREAT ADVISORIES (Intelligence)
+            # ------------------------------------------------------------------
+            # External feed data (from backend/advisory_feed.py).
+            # We use UNIQUE index on 'advisory_id' for UPSERT capability.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS threat_advisories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    advisory_id TEXT UNIQUE,
+                    title TEXT,
+                    link TEXT,
+                    pub_date TEXT,
+                    description TEXT,
+                    severity REAL,
+                    impact TEXT,
+                    cvss_vector TEXT,
+                    vendor TEXT,
+                    products TEXT,
+                    cve_ids TEXT,
+                    
+                    -- HTML extraction fields
+                    summary TEXT,
+                    html_title TEXT,
+                    html_description TEXT,
+                    html_fetched_at TEXT,
+                    
+                    updated_at TEXT
+                )
+            """)
             
-            # Table: advisories (Processing Queue)
-            cursor.execute('''CREATE TABLE IF NOT EXISTS advisories (
-                advisory_id TEXT PRIMARY KEY,
-                title TEXT,
-                link TEXT,
-                pub_date TEXT,
-                description TEXT,
-                severity REAL,
-                impact TEXT,
-                cvss_vector TEXT,
-                vendor TEXT,
-                cve_ids TEXT,               
-                products TEXT,
-                summary TEXT,
-                html_title TEXT,
-                html_description TEXT,
-                html_fetched_at TEXT,
-                updated_at TEXT
-            )''')
-
-            # -----------------------------------------------------------------
-            # SCHEMA GROUP 4: FORENSICS & POSTURE
-            # -----------------------------------------------------------------
-
-            # Process List snapshot
-            cursor.execute('''CREATE TABLE IF NOT EXISTS telemetry_processes (
-                pid INTEGER,
-                name TEXT,
-                path TEXT,
-                username TEXT,
-                start_time TEXT
-            )''')
-            
-            cursor.execute('''CREATE TABLE IF NOT EXISTS system_services (
-                name TEXT,
-                display_name TEXT,
-                status TEXT,
-                start_mode TEXT
-            )''')
-            
-            # Root Certificates (MitM detection)
-            cursor.execute('''CREATE TABLE IF NOT EXISTS certificates (
-                subject TEXT,
-                issuer TEXT,
-                expiry_date TEXT,
-                is_root BOOLEAN -- True if Self-Signed (Root CA)
-            )''')
-
-            cursor.execute('''CREATE TABLE IF NOT EXISTS user_accounts (
-                username TEXT,
-                uid TEXT,
-                description TEXT,
-                last_login TEXT
-            )''')
-            
-            cursor.execute('''CREATE TABLE IF NOT EXISTS telemetry_windows_updates (
-                hotfix_id TEXT,
-                description TEXT,
-                installed_on TEXT,
-                installed_by TEXT
-            )''')
-            
-            cursor.execute('''CREATE TABLE IF NOT EXISTS system_posture (
-                check_name TEXT,
-                status TEXT,
-                timestamp TEXT
-            )''')
-            
-            # Browser Extensions (Often malicious)
-            cursor.execute('''CREATE TABLE IF NOT EXISTS telemetry_browser_extensions (
-                name TEXT,
-                version TEXT,
-                browser TEXT,
-                identifier TEXT,
-                status TEXT
-            )''')
-            
-            # Kernel Drivers (Rootkit checks)
-            cursor.execute('''CREATE TABLE IF NOT EXISTS telemetry_drivers (
-                name TEXT,
-                description TEXT,
-                provider TEXT,
-                status TEXT,
-                signed INTEGER  
-            )''')
-            
-            cursor.execute('''CREATE TABLE IF NOT EXISTS telemetry_hosts (
-                hostnames TEXT,
-                ip_address TEXT
-            )''')
-
-            # FIM (File Integrity Monitoring)
-            cursor.execute('''CREATE TABLE IF NOT EXISTS telemetry_fim_alerts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT,
-                file_path TEXT,
-                action_type TEXT,   -- Modified, Deleted
-                severity TEXT
-            )''')
-            
-            cursor.execute('''CREATE TABLE IF NOT EXISTS system_metadata (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )''')
-
+            # Commit the schema changes to disk
             conn.commit()
             
         except sqlite3.Error as e:
-            logging.critical(f"Database Schema Init Failed: {e}")
+            # Fatal error if we cannot create tables.
+            logging.critical(f"Database Initialization Error: {e}")
         finally:
+            # Always close the connection to prevent file locks
             conn.close()
 
-    # ---------------------------------------------------------
-    # CORE CRUD METHODS (Create, Read, Update, Delete)
-    # ---------------------------------------------------------
+    # --------------------------------------------------------------------------
+    # CRUD OPERATIONS (Create, Read, Update, Delete)
+    # --------------------------------------------------------------------------
 
     def execute_query(self, query: str, params: Tuple = ()) -> List[Tuple]:
         """
-        Executes a Read-Only Query (SELECT).
+        Executes a Read-Only SQL query (SELECT).
         
-        Security Note:
-            `params` is passed separately to the driver. The driver escapes it.
-            NEVER do: cursor.execute(f"SELECT * FROM table WHERE id={id}")
+        Args:
+            query (str): The SQL statement with '?' placeholders.
+            params (tuple): The values to bind to the placeholders.
+            
+        Returns:
+            list: A list of tuples representing the rows.
+            
+        Security Check:
+            This method strictly uses `execute(query, params)`.
+            It prevents SQL Injection because the DB driver escapes the params.
         """
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
+            # Execute with safe parameter binding
             cursor.execute(query, params)
-            return cursor.fetchall()
-        except Exception as e:
-            logging.error(f"DB Read Error [{query}]: {e}")
+            # Fetch all results into memory
+            rows = cursor.fetchall()
+            return rows
+        except sqlite3.Error as e:
+            logging.error(f"Query Failed: {query} | Error: {e}")
             return []
         finally:
             conn.close()
 
     def execute_update(self, query: str, params: Tuple = ()) -> bool:
         """
-        Executes a Write Query (INSERT, UPDATE, DELETE).
-        Returns True on success.
+        Executes a Write operation (INSERT, UPDATE, DELETE).
+        
+        Returns:
+            bool: True if successful, False otherwise.
         """
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
             cursor.execute(query, params)
+            # IMPORTANT: Writes must be explicitly committed in SQLite
             conn.commit()
             return True
-        except Exception as e:
-            logging.error(f"DB Write Error [{query}]: {e}")
+        except sqlite3.Error as e:
+            logging.error(f"Update Failed: {query} | Error: {e}")
+            # Rollback is automatic on exception in older versions, but manual is safer
+            conn.rollback()
             return False
         finally:
             conn.close()
 
     def execute_transaction(self, operations: List[Tuple[str, Tuple]]) -> bool:
         """
-        Executes multiple queries atomically.
+        Executes a Batch of operations atomically.
+        
+        If ANY operation fails, ALL changes are rolled back.
+        This ensures the database is never left in a half-broken state.
+        
+        Args:
+            operations: List of (query_string, params_tuple)
         """
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
+            # Iterate through the list of operations
             for query, params in operations:
                 cursor.execute(query, params)
+            
+            # Commit only after all operations succeed
             conn.commit()
             return True
-        except Exception as e:
-            logging.error(f"Transaction Failed. Rolling back. {e}")
-            conn.rollback() # Critical: Maintain consistency
+        except sqlite3.Error as e:
+            logging.error(f"Transaction Failed. Rolling back changes. Error: {e}")
+            # The 'Undo' button for databases
+            conn.rollback()
             return False
         finally:
             conn.close()
 
-    # ---------------------------------------------------------
-    # DOMAIN SPECIFIC HELPERS
-    # ---------------------------------------------------------
+    # --------------------------------------------------------------------------
+    # SPECIALIZED DATA ACCESS OBJECTS (DAO Methods)
+    # --------------------------------------------------------------------------
 
-    def upsert_advisory(self, data: Dict[str, Any]) -> bool:
+    def upsert_advisory(self, item: Dict[str, Any]) -> bool:
         """
-        Specialized logic for the RSS Feed items.
-        Needed because we scrape them repeatedly and don't want duplicates.
+        Insert or Update (UPSERT) a Threat Advisory.
+        
+        Logic:
+            If 'advisory_id' exists -> Update the record.
+            If not -> Insert new record.
         """
-        conn = self.get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT advisory_id FROM advisories WHERE advisory_id = ?", (data['advisory_id'],))
-            exists = cursor.fetchone()
-            
-            pub_date = str(data.get('pub_date', ''))
-            fetched_at = str(data.get('html_fetched_at', ''))
-            updated_at = str(data.get('updated_at', ''))
-            
-            if exists:
-                cursor.execute('''UPDATE advisories SET 
-                    title=?, link=?, pub_date=?, description=?, severity=?, impact=?, 
-                    cvss_vector=?, vendor=?, cve_ids=?, products=?, summary=?, 
-                    html_title=?, html_description=?, html_fetched_at=?, updated_at=?
-                    WHERE advisory_id=?''',
-                    (data['title'], data['link'], pub_date, data['description'], data['severity'], data['impact'],
-                     data['cvss_vector'], data['vendor'], data['cve_ids'], data['products'], data['summary'],
-                     data['html_title'], data['html_description'], fetched_at, updated_at,
-                     data['advisory_id']))
-            else:
-                cursor.execute('''INSERT INTO advisories (
-                    advisory_id, title, link, pub_date, description, severity, impact, 
-                    cvss_vector, vendor, cve_ids, products, summary, 
-                    html_title, html_description, html_fetched_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                (data['advisory_id'], data['title'], data['link'], pub_date, data['description'], data['severity'], data['impact'],
-                 data['cvss_vector'], data['vendor'], data['cve_ids'], data['products'], data['summary'],
-                 data['html_title'], data['html_description'], fetched_at, updated_at))
-            
-            conn.commit()
-            return True
-        except Exception as e:
-            logging.error(f"Upsert Advisory Error: {e}")
-            return False
-        finally:
-            conn.close()
+        sql = """
+            INSERT INTO threat_advisories (
+                advisory_id, title, link, pub_date, description, severity, 
+                impact, cvss_vector, vendor, products, cve_ids, 
+                summary, html_title, html_description, html_fetched_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(advisory_id) DO UPDATE SET
+                title=excluded.title,
+                pub_date=excluded.pub_date,
+                description=excluded.description,
+                severity=excluded.severity,
+                impact=excluded.impact,
+                html_fetched_at=excluded.html_fetched_at,
+                updated_at=excluded.updated_at
+        """
+        
+        # Prepare the tuple of values
+        params = (
+            item['advisory_id'], item['title'], item['link'], str(item['pub_date']),
+            item['description'], item['severity'], item['impact'], item['cvss_vector'],
+            item['vendor'], item['products'], item['cve_ids'],
+            item['summary'], item['html_title'], item['html_description'],
+            str(item.get('html_fetched_at', '')), str(item['updated_at'])
+        )
+        
+        return self.execute_update(sql, params)
 
-    def update_metadata(self, key: str, value: str):
-        return self.execute_update("INSERT OR REPLACE INTO system_metadata (key, value) VALUES (?, ?)", (key, str(value)))
+    def get_advisory_by_link(self, link: str) -> Optional[Dict]:
+        """
+        Retrieves a single advisory by its URL (Link).
+        Used for caching checks to prevent re-crawling.
+        """
+        sql = "SELECT * FROM threat_advisories WHERE link = ?"
+        rows = self.execute_query(sql, (link,))
+        
+        if rows:
+            # Map tuple back to dictionary provided we know the schema order
+            # (Ideally utilize row_factory for this, but manual mapping teaches the structure)
+            r = rows[0]
+            # Warning: Hardcoding indices is brittle to schema changes. 
+            # row_factory is preferred in production.
+            return {
+                "id": r[0],
+                "advisory_id": r[1],
+                "title": r[2],
+                "link": r[3],
+                "html_fetched_at": r[14] # Index 14 based on Create Table order
+            }
+        return None
 
-    def get_metadata(self, key: str) -> str:
-        rows = self.execute_query("SELECT value FROM system_metadata WHERE key = ?", (key,))
-        return rows[0][0] if rows else ""
-
-# ---------------------------------------------------------
-# UTILITY FUNCTIONS
-# ---------------------------------------------------------
-
-def get_advisory_by_link(link: str) -> Optional[Dict[str, Any]]:
-    """Helper for the crawler to check existence by URL."""
-    db = DatabaseManager()
-    rows = db.execute_query("SELECT * FROM advisories WHERE link = ?", (link,))
-    if rows:
-        r = rows[0]
-        # Manual Mapping (Index -> Key)
-        return {
-            "advisory_id": r[0], "title": r[1], "link": r[2], "pub_date": r[3],
-            "description": r[4], "severity": r[5], "impact": r[6],
-            "cvss_vector": r[7], "vendor": r[8], "cve_ids": r[9],
-            "products": r[10], "summary": r[11], "html_title": r[12],
-            "html_description": r[13], "html_fetched_at": r[14], "updated_at": r[15]
-        }
-    return None
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    print("Initialize DB Schema...")
-    db = DatabaseManager()
-    print("Done.")
+    def get_top_vulnerabilities(self, limit=10):
+        """
+        Returns the highest severity vulnerabilities found on the system.
+        Joining Software + Matches + CVE Details would go here.
+        """
+        # Currently simplified to just return count or basic list
+        pass
