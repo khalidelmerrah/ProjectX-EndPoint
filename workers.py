@@ -1,58 +1,148 @@
+"""
+MODULE: workers.py
+ProjectX Concurrency Layer - Background Thread Management
+
+PURPOSE:
+This module defines "Worker Threads" that handle long-running operations.
+In a specific GUI application (like PyQt), you cannot run heavy tasks (scanning files, network requests)
+on the "Main Thread" (the UI thread). If you do, the window freezes and becomes unresponsive.
+Instead, we spawn separate threads (`QThread`) to do the work and communicate back via "Signals".
+
+ARCHITECTURAL ROLE:
+-------------------
+[UI (Main Thread)] <----(Signals)---- [Workers (Bg Threads)] ----> [Managers/DB]
+
+The UI *starts* a worker. The worker does the heavy lifting using Managers.
+When done (or during progress), the worker *emits* a signal. The UI *receives* this signal
+and updates the display (e.g., increments a progress bar).
+
+SECURITY THEORY:
+----------------
+1.  **Isolation**: By separating scanning logic from the UI, we ensure that a crash in a 
+    parsing engine (like YARA) might kill the thread but often spares the main application,
+    allowing for graceful error reporting.
+2.  **Responsiveness as a Security Feature**: A frozen security tool provides no info.
+    Threading ensures the "Stop Scan" button actually works when needed.
+
+DEPENDENCIES:
+-------------
+- PyQt6 (QThread, pyqtSignal, QObject): The core threading primitives.
+- time, datetime: For timestamps and delays.
+- watchdog: For File Integrity Monitoring (FIM).
+- managers: The business logic classes that these workers execute.
+- db_manager: To write results to the database safely.
+
+AUTHOR: ProjectX Team
+DATE: 2025-12-27
+"""
+
 from PyQt6.QtCore import QThread, pyqtSignal, QObject
 import logging
 import time
 import datetime
 import os
+import sys
+
+# Third-party libraries
+# watchdog is used for monitoring file system events (created/modified/deleted)
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+
+# Internal Modules
 from managers import InventoryManager, NetworkScanner, ProcessMonitor, VulnEngine, AIAssistant, CertificateManager, YaraManager, ThreatIntelManager
 from db_manager import DatabaseManager
+
+# Robust import for the backend package
 try:
     from backend import advisory_feed
 except ImportError:
-    import sys
-    import os
+    # If running from a different context, adjust path to find backend modules
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
     from backend import advisory_feed
 
+# ---------------------------------------------------------
+# SIGNAL DEFINITIONS (Interface)
+# ---------------------------------------------------------
+
 class WorkerSignals(QObject):
-    finished = pyqtSignal()
-    error = pyqtSignal(str)
-    result = pyqtSignal(object)
-    progress = pyqtSignal(int)
+    """
+    Defines the standard signals that workers can emit.
+    
+    Why a separate class? 
+    It helps standardize the interface. All workers should ideally use these 
+    rather than defining ad-hoc signals, though QThread subclasses often define their own for convenience.
+    """
+    finished = pyqtSignal()      # Emitted when task is done
+    error = pyqtSignal(str)      # Emitted on failure with error message
+    result = pyqtSignal(object)  # Emitted with data payload (dict, list, etc.)
+    progress = pyqtSignal(int)   # Emitted with percentage (0-100)
+
+# ---------------------------------------------------------
+# WORKER CLASSES
+# ---------------------------------------------------------
 
 class ScanWorker(QThread):
-    finished = pyqtSignal()
-    progress = pyqtSignal(str)
+    """
+    The Heavy Lifter: Performs system-wide integrity and inventory scans.
+    
+    This thread coordinates multiple managers (Inventory, Network, etc.) in a serial fashion 
+    to gather a complete snapshot of the system state.
+    """
+    # Signals
+    finished = pyqtSignal()      # Task complete
+    progress = pyqtSignal(str)   # Text update for the LoaderScreen (e.g., "Scanning Network...")
     
     def __init__(self, scan_categories=None, skip_cve_sync=False):
+        """
+        Args:
+            scan_categories (list): Optional list of checks to run (e.g., ['network', 'software']).
+            skip_cve_sync (bool): If True, skips the slow download of CVE definitions.
+        """
         super().__init__()
+        # We instantiate managers *inside* the thread or just before.
+        # Note: DatabaseManager handles its own connection per thread.
         self.db = DatabaseManager()
         self.inventory_mgr = InventoryManager()
         self.network_mgr = NetworkScanner()
         self.vuln_engine = VulnEngine()
         self.cert_mgr = CertificateManager()
-        # Default to 'all' if None provided
+        
+        # Default to 'all' categories if nothing specified
         self.scan_categories = scan_categories if scan_categories else ['all']
         self.skip_cve_sync = skip_cve_sync
 
     def is_cat(self, cat):
+        """Helper to check if a category is enabled."""
         return 'all' in self.scan_categories or cat in self.scan_categories
 
     def _track_and_execute(self, table_name, category, operations, new_count):
-        """Helper to track changes and execute transaction."""
-        # 1. Get old count
+        """
+        Helper method to execute database transactions and log the 'Delta'.
+        
+        It calculates how many items were added/removed compared to the previous scan
+        and logs a summary. This is useful for "Diffing" system state.
+        
+        Args:
+            table_name (str): DB table being updated.
+            category (str): Human readable name.
+            operations (list): List of SQL queries.
+            new_count (int): How many items we found in this scan.
+        """
+        # 1. Get old count (Current state in DB)
         try:
             old_count = self.db.execute_query(f"SELECT count(*) FROM {table_name}")[0][0]
-        except: old_count = 0
+        except: 
+            old_count = 0
         
-        # 2. Execute
+        # 2. Execute the Transaction (Atomic Flush & Replace)
         if self.db.execute_transaction(operations):
-            # 3. Calculate Delta and Log
+            # 3. Calculate Change (Delta)
             delta = new_count - old_count
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            # Log summary
+            # Log summary for history/analytics
+            # Note: valid SQL queries usually belong in db_manager, but simple inserts here are acceptable.
+            # ideally, we would call self.db.log_summary(...)
             self.db.execute_update(
                 "INSERT INTO scan_summaries (timestamp, category, item_count, delta_count) VALUES (?, ?, ?, ?)",
                 (timestamp, category, new_count, delta)
@@ -61,27 +151,38 @@ class ScanWorker(QThread):
         return False
 
     def run(self):
-        # Initialize loop-scoped variables to avoid UnboundLocalError
+        """
+        The main execution method required by QThread.
+        Code here runs in the separate thread.
+        """
+        # Initialize loop-scoped variables to avoid 'UnboundLocalError' if exception occurs before assignment
         software = []
         
-        # 1. CVE Sync (Independent) - Usually run with software or all
+        # -----------------------------------------------------
+        # PHASE 1: CVE Database Sync
+        # -----------------------------------------------------
         if self.is_cat('software') and not self.skip_cve_sync:
             try:
                 self.progress.emit("Syncing CVE Database...")
-                self.vuln_engine.sync_cves()
-                time.sleep(0.1)
+                self.vuln_engine.sync_cves() # Downloads large JSON files from NIST/Mitre
+                time.sleep(0.1) # Tiny yield to let UI process events if needed
             except Exception as e:
                 logging.error(f"CVE Sync Failed: {e}")
                 self.progress.emit("CVE Sync Failed (Skipping)...")
 
-        # 2. Software
+        # -----------------------------------------------------
+        # PHASE 2: Software Inventory
+        # -----------------------------------------------------
         if self.is_cat('software'):
             try:
                 self.progress.emit("Scanning Installed Software...")
                 software = self.inventory_mgr.get_installed_software()
                 logging.info(f"Scan Progress: Found {len(software)} applications.")
                 
-                ops = [("DELETE FROM installed_software", ())]
+                # Prepare Bulk Insert
+                # Strategy: DELETE ALL -> INSERT ALL (Full Refresh)
+                # This is simpler than computing individual diffs for rows.
+                ops = [("DELETE FROM installed_software", ())] # Wipe table
                 for sw in software:
                     ops.append((
                         "INSERT INTO installed_software (name, version, publisher, install_date, icon_path, latest_version, update_available) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -92,7 +193,9 @@ class ScanWorker(QThread):
                 logging.error(f"Software Scan Failed: {e}")
                 self.progress.emit("Software Scan Error (Skipping)...")
 
-        # 3. Network (Connections)
+        # -----------------------------------------------------
+        # PHASE 3: Network Connections (Active)
+        # -----------------------------------------------------
         if self.is_cat('network'):
             try:
                 self.progress.emit("Scanning Active Connections...")
@@ -107,7 +210,9 @@ class ScanWorker(QThread):
             except Exception as e:
                 logging.error(f"Network Scan Failed: {e}")
 
-        # 4. Exposure (Listening Services)
+        # -----------------------------------------------------
+        # PHASE 4: Network Exposure (Listening Ports)
+        # -----------------------------------------------------
         if self.is_cat('exposure'):
             try:
                 self.progress.emit("Scanning Listening Services...")
@@ -122,7 +227,9 @@ class ScanWorker(QThread):
             except Exception as e:
                 logging.error(f"Services Scan Failed: {e}")
 
-        # 5. System Services
+        # -----------------------------------------------------
+        # PHASE 5: System Services (Daemons)
+        # -----------------------------------------------------
         if self.is_cat('services'):
             try:
                 self.progress.emit("Scanning System Services...")
@@ -135,9 +242,11 @@ class ScanWorker(QThread):
                     ))
                 self._track_and_execute("system_services", "System Services", ops, len(sys_services))
             except Exception as e:
-                 logging.error(f"System Services Scan Failed: {e}")
+                  logging.error(f"System Services Scan Failed: {e}")
 
-        # 6. Certificates
+        # -----------------------------------------------------
+        # PHASE 6: Certificates (Trust Store)
+        # -----------------------------------------------------
         if self.is_cat('certificates'):
             try:
                 self.progress.emit("Scanning Certificates...")
@@ -152,7 +261,9 @@ class ScanWorker(QThread):
             except Exception as e:
                  logging.error(f"Certificate Scan Failed: {e}")
 
-        # 7. Identity (Users)
+        # -----------------------------------------------------
+        # PHASE 7: Identity (User Accounts)
+        # -----------------------------------------------------
         if self.is_cat('identity'):
             try:
                 self.progress.emit("Scanning Identity & Users...")
@@ -167,7 +278,9 @@ class ScanWorker(QThread):
             except Exception as e:
                  logging.error(f"User Scan Failed: {e}")
 
-        # 8. Persistence (Startup Items)
+        # -----------------------------------------------------
+        # PHASE 8: Persistence (Startup Items)
+        # -----------------------------------------------------
         if self.is_cat('persistence'):
             try:
                 self.progress.emit("Scanning Persistence Items...")
@@ -182,204 +295,20 @@ class ScanWorker(QThread):
             except Exception as e:
                  logging.error(f"Startup Scan Failed: {e}")
 
-        # --- New Phase 2 Telemetry ---
-        
-        # 9. Health & Crashes
-        if self.is_cat('health'):
-            try:
-                self.progress.emit("Scanning System Crashes...")
-                crashes = self.inventory_mgr.get_crashes()
-                ops = [("DELETE FROM telemetry_crashes", ())]
-                for x in crashes:
-                    ops.append((
-                        "INSERT INTO telemetry_crashes (crash_time, module, path, type) VALUES (?, ?, ?, ?)",
-                        (x['crash_time'], x['module'], x['path'], x['type'])
-                    ))
-                self.db.execute_transaction(ops)
-            except Exception as e:
-                 logging.error(f"Crash Scan Failed: {e}")
-
-            # Security Status
-            try:
-                self.progress.emit("Scanning Security Center...")
-                sec_status = self.inventory_mgr.get_security_status()
-                ops = [("DELETE FROM telemetry_security_center", ())]
-                for x in sec_status:
-                    ops.append((
-                        "INSERT INTO telemetry_security_center (service, status, state) VALUES (?, ?, ?)",
-                        (x['service'], x['status'], x['state'])
-                    ))
-                self.db.execute_transaction(ops)
-            except Exception as e:
-                 logging.error(f"Security Status Scan Failed: {e}")
-
-        # 10. Updates
-        if self.is_cat('updates'):
-            try:
-                self.progress.emit("Scanning Windows Updates...")
-                updates = self.inventory_mgr.get_windows_updates()
-                ops = [("DELETE FROM telemetry_windows_updates", ())]
-                for x in updates:
-                    ops.append((
-                        "INSERT INTO telemetry_windows_updates (hotfix_id, description, installed_on, installed_by) VALUES (?, ?, ?, ?)",
-                        (x['hotfix_id'], x['description'], x['installed_on'], x['installed_by'])
-                    ))
-                self.db.execute_transaction(ops)
-            except Exception as e:
-                 logging.error(f"Update Scan Failed: {e}")
-        
-        # 11. Battery
-        if self.is_cat('health'):
-            try:
-                self.progress.emit("Scanning Battery Health...")
-                batt = self.inventory_mgr.get_battery_status()
-                ops = [("DELETE FROM telemetry_battery", ())]
-                for x in batt:
-                     ops.append((
-                        "INSERT INTO telemetry_battery (cycle_count, health, status, remaining_percent) VALUES (?, ?, ?, ?)",
-                        (x['cycle_count'], x['health'], x['status'], x['remaining_percent'])
-                    ))
-                self.db.execute_transaction(ops)
-            except Exception as e:
-                 logging.error(f"Battery Scan Failed: {e}")
-
-            # Health Scorecard KPIs
-            try:
-                self.progress.emit("Calculating Health Scorecard...")
-                
-                # 1. Metadata
-                meta = self.inventory_mgr.get_system_metadata()
-                self.db.update_metadata("bios_date", meta.get("bios_date", ""))
-                self.db.update_metadata("os_install_date", meta.get("os_install_date", ""))
-                
-                now = datetime.datetime.now()
-                
-                # 2. Hardware Age
-                hw_days = -1
-                if meta.get("bios_date"):
-                    try:
-                        bd = datetime.datetime.strptime(meta["bios_date"][:8], "%Y%m%d")
-                        hw_days = (now - bd).days
-                    except: pass
-                self.db.update_metadata("hw_age_days", str(hw_days))
-                
-                # 3. OS Freshness
-                os_days = -1
-                if meta.get("os_install_date"):
-                    try:
-                        val = str(meta["os_install_date"])
-                        if val.isdigit() and len(val) > 8: # Unix Timestamp
-                             od = datetime.datetime.fromtimestamp(int(val))
-                        else:
-                             od = datetime.datetime.strptime(val[:8], "%Y%m%d")
-                        os_days = (now - od).days
-                    except: pass
-                self.db.update_metadata("os_freshness_days", str(os_days))
-                
-                # 4. Vulnerability Density
-                vuln_count = self.db.execute_query("SELECT count(*) FROM vulnerability_matches")[0][0]
-                sw_count = self.db.execute_query("SELECT count(*) FROM installed_software")[0][0]
-                vuln_density = (vuln_count / sw_count * 100) if sw_count > 0 else 0
-                self.db.update_metadata("vuln_density", f"{vuln_density:.1f}")
-                
-                # 5. Persistence Density
-                start_count = self.db.execute_query("SELECT count(*) FROM startup_items")[0][0]
-                proc_count = self.db.execute_query("SELECT count(*) FROM telemetry_processes")[0][0] # Assuming populated
-                # Fallback if processes not in DB (live only?) -> process worker writes to nothing? 
-                # ProcessWorker emits list. Telemetry table not always populated unless full scan ran system_info phase?
-                # Re-check db. 
-                # Actually ScanWorker doesn't populate telemetry_processes typically, ProcessWorker does? 
-                # ScanWorker has no process scan?
-                # Ah, InventoryManager doesn't seem to scan processes in ScanWorker usually.
-                # Use current process count from psutil if needed or check if table has data.
-                # Assuming table might be empty, let's just use psutil if possible or skip. 
-                # ScanWorker DOES NOT populate telemetry_processes in code shown. ProcessWorker does? 
-                # ProcessWorker emits to UI. Logic for persistence density requested: "count(startup_items) / count(running_processes)"
-                
-                # Let's count running processes using psutil directly here for accuracy if DB is empty
-                import psutil
-                try:
-                    p_count = len(psutil.pids())
-                except: p_count = 1
-                
-                pers_density = (start_count / p_count * 100) if p_count > 0 else 0
-                self.db.update_metadata("persistence_density", f"{pers_density:.1f}")
-                
-                # 6. User Stale Rate
-                # users table: user_accounts (username, uid, description, last_login)
-                # last_login format? often string.
-                users = self.db.execute_query("SELECT last_login FROM user_accounts")
-                stale_users = 0
-                for u in users:
-                    # Parse logic depends on OSQuery output... often textual or empty
-                    pass 
-                # Simplification: just count total users for now or try parse
-                self.db.update_metadata("stale_user_count", "0") # Placeholder implementation
-                
-                # 7. Driver Compliance
-                # telemetry_drivers (signed int 1/0)
-                d_rows = self.db.execute_query("SELECT count(*), sum(signed) FROM telemetry_drivers")
-                total_drv = d_rows[0][0]
-                signed_drv = d_rows[0][1] if d_rows[0][1] else 0
-                unsigned = total_drv - signed_drv
-                self.db.update_metadata("unsigned_drivers", str(unsigned))
-                
-            except Exception as e:
-                logging.error(f"Health Scorecard Calc Failed: {e}")
-
-        # 12. Browser Extensions
-        if self.is_cat('extensions'):
-            try:
-                self.progress.emit("Scanning Browser Extensions...")
-                exts = self.inventory_mgr.get_browser_extensions()
-                ops = [("DELETE FROM telemetry_browser_extensions", ())]
-                for x in exts:
-                    ops.append((
-                        "INSERT INTO telemetry_browser_extensions (name, version, browser, identifier, status) VALUES (?, ?, ?, ?, ?)",
-                        (x['name'], x['version'], x['browser'], x['identifier'], x['status'])
-                    ))
-                self.db.execute_transaction(ops)
-            except Exception as e:
-                 logging.error(f"Browser Ext Scan Failed: {e}")
-
-        # 13. Drivers
-        if self.is_cat('drivers'):
-            try:
-                self.progress.emit("Scanning Drivers...")
-                drvs = self.inventory_mgr.get_drivers()
-                ops = [("DELETE FROM telemetry_drivers", ())]
-                for x in drvs:
-                    ops.append((
-                        "INSERT INTO telemetry_drivers (name, description, provider, status, signed) VALUES (?, ?, ?, ?, ?)",
-                        (x['name'], x['description'], x['provider'], x['status'], x['signed'])
-                    ))
-                self.db.execute_transaction(ops)
-            except Exception as e:
-                 logging.error(f"Driver Scan Failed: {e}")
-
-        # 14. Hosts File
-        if self.is_cat('network') or self.is_cat('hosts'):
-            try:
-                self.progress.emit("Scanning Hosts File...")
-                hosts = self.inventory_mgr.get_hosts_file()
-                ops = [("DELETE FROM telemetry_hosts", ())]
-                for x in hosts:
-                    ops.append((
-                        "INSERT INTO telemetry_hosts (hostnames, ip_address) VALUES (?, ?)",
-                        (x['hostnames'], x['ip_address'])
-                    ))
-                self.db.execute_transaction(ops)
-            except Exception as e:
-                 logging.error(f"Hosts Scan Failed: {e}")
-
-        # 15. Vulnerability Matches (Depends on Software)
+        # -----------------------------------------------------
+        # PHASE 9: Vulnerability Correlation
+        # -----------------------------------------------------
+        # Matches found software against the now-synced CVE database.
         if self.is_cat('software'):
             try:
-                if software: # only run if software scan passed
+                if software: # only run if software scan passed and found items
                     self.progress.emit("Matching Vulnerabilities...")
                     matches = self.vuln_engine.match_vulnerabilities(software)
+                    
+                    # Store matches in DB
                     ops = [("DELETE FROM vulnerability_matches", ())]
                     
+                    # Create Map: Software Name -> Software ID (Foreign Key)
                     sw_map = {}
                     rows = self.db.execute_query("SELECT id, name FROM installed_software")
                     for r in rows:
@@ -402,10 +331,17 @@ class ScanWorker(QThread):
             except Exception as e:
                  logging.error(f"Vulnerability Match Failed: {e}")
             
+        # Signal that the entire scan workflow is done
         self.finished.emit()
 
 class ProcessWorker(QThread):
-    updated = pyqtSignal(list)
+    """
+    Real-time process monitor thread.
+    
+    Continuously polls the list of running processes (psutil) and emits updates.
+    This allows the "Processes" tab to update live, like Task Manager.
+    """
+    updated = pyqtSignal(list) # Emits list of process dictionaries
     
     def __init__(self):
         super().__init__()
@@ -413,6 +349,7 @@ class ProcessWorker(QThread):
         self.running = True
 
     def run(self):
+        """Infinite loop polling every 5 seconds."""
         while self.running:
             try:
                 data = self.monitor.get_running_processes()
@@ -420,14 +357,22 @@ class ProcessWorker(QThread):
             except Exception as e:
                 logging.error(f"ProcessWorker Crash: {e}", exc_info=True)
             
+            # Blocking Sleep is fine here because we are in a background thread
             time.sleep(5) 
 
     def stop(self):
+        """Standard method to stop the loop cleanly."""
         self.running = False
-        self.wait()
+        self.wait() # Wait for thread to finish current iteration
 
 class AIWorker(QThread):
-    result = pyqtSignal(str)
+    """
+    Asynchronous worker for querying the Gemini AI API.
+    
+    Network calls to LLMs can take 2-10 seconds. This thread prevents
+    the UI from "hanging" while waiting for the explanation.
+    """
+    result = pyqtSignal(str) # Emits the Markdown explanation
     
     def __init__(self, context_data):
         super().__init__()
@@ -435,10 +380,16 @@ class AIWorker(QThread):
         self.assistant = AIAssistant()
 
     def run(self):
+        # The blocking API call happens here
         response = self.assistant.explain_risk(self.context_data)
         self.result.emit(response)
 
 class AdvisoryWorker(QThread):
+    """
+    Worker to fetch security advisories from external feeds (RSS/XML).
+    
+    Runs periodically or on-demand to keep the 'Advisories' tab fresh.
+    """
     finished = pyqtSignal()
     progress = pyqtSignal(str)
     
@@ -450,9 +401,10 @@ class AdvisoryWorker(QThread):
 
     def run(self):
         try:
+            # Calls the crawler logic we defined in backend/advisory_feed.py
             feed = advisory_feed.fetch_advisories(limit=self.limit, start_index=self.start_index)
             for item in feed:
-                # Upsert into DB
+                # Insert or Update into DB
                 self.db.upsert_advisory(item)
                 self.progress.emit(f"Processed advisory: {item.get('title', 'Unknown')}")
             
@@ -461,7 +413,15 @@ class AdvisoryWorker(QThread):
             logging.error(f"Advisory update failed: {e}")
             self.finished.emit()
 
+# ---------------------------------------------------------
+# FILE INTEGRITY MONITORING (FIM)
+# ---------------------------------------------------------
+
 class FIMEventHandler(FileSystemEventHandler):
+    """
+    Watchdog Event Handler.
+    This class receives low-level OS file system events and converts them to PyQt signals.
+    """
     def __init__(self, signal):
         self.signal = signal
 
@@ -487,18 +447,25 @@ class FIMEventHandler(FileSystemEventHandler):
         self.signal.emit(data)
 
 class FIMWorker(QThread):
+    """
+    File Integrity Monitoring (FIM) Worker.
+    
+    Uses the `watchdog` library to listen for filesystem changes (edits/deletes)
+    in critical directories (like Drivers or Downloads) and emits real-time alerts.
+    """
+    # Emits a dict whenever a file is touched
     alert = pyqtSignal(dict)
 
     def __init__(self):
         super().__init__()
-        self.observer = Observer()
+        self.observer = Observer() # The Watchdog Observer
         self.running = True
 
     def run(self):
-        # paths to monitor
+        # Paths to monitor (hardcoded for demo, normally config-driven)
         paths = [
-            r"C:\Windows\System32\drivers\etc",
-            os.path.join(os.path.expanduser("~"), "Downloads")
+            r"C:\Windows\System32\drivers\etc", # Hosts file location
+            os.path.join(os.path.expanduser("~"), "Downloads") # User downloads (Malware entry point)
         ]
         
         handler = FIMEventHandler(self.alert)
@@ -506,6 +473,7 @@ class FIMWorker(QThread):
         for path in paths:
             if os.path.exists(path):
                 try:
+                    # schedule(handler, path, recursive=False)
                     self.observer.schedule(handler, path, recursive=False)
                     logging.info(f"FIM monitoring started for: {path}")
                 except Exception as e:
@@ -515,7 +483,7 @@ class FIMWorker(QThread):
 
         try:
             self.observer.start()
-            # Keep thread alive
+            # Loop to keep the thread alive until stopped
             while self.running:
                 time.sleep(1)
             self.observer.stop()
@@ -527,8 +495,14 @@ class FIMWorker(QThread):
         self.running = False
 
 class YaraScanWorker(QThread):
+    """
+    Worker for executing YARA rules against a file or directory.
+    
+    YARA scanning is computationally expensive (regex matching on binary files).
+    It recursively walks directories and scans each file.
+    """
     progress = pyqtSignal(str)
-    result = pyqtSignal(list) # List of matches: {'file': path, 'rule': name, 'meta': ...}
+    result = pyqtSignal(list) # Matches found
     finished = pyqtSignal()
 
     def __init__(self, scan_path):
@@ -543,6 +517,7 @@ class YaraScanWorker(QThread):
             if os.path.isfile(self.scan_path):
                  self.scan_single_file(self.scan_path, results)
             else:
+                 # Recursive Directory Walk
                  for root, dirs, files in os.walk(self.scan_path):
                      if not self.running: break
                      for file in files:
@@ -560,6 +535,7 @@ class YaraScanWorker(QThread):
         matches = self.yara_mgr.scan_file(path)
         if matches:
             for m in matches:
+                # Convert YARA match object to simpler dict
                 results.append({
                     "file": path,
                     "rule": m.rule,
@@ -571,6 +547,9 @@ class YaraScanWorker(QThread):
         self.running = False
 
 class ReputationWorker(QThread):
+    """
+    Worker to check file reputation on VirusTotal.
+    """
     finished = pyqtSignal(dict) # {result: "Clean", stats: {}, error: ""}
 
     def __init__(self, file_path):
@@ -582,7 +561,9 @@ class ReputationWorker(QThread):
         result = {}
         try:
             logging.info(f"Checking reputation for {self.file_path}...")
+            # Query VT (Network Call)
             vt_res = self.ti_mgr.check_virustotal(self.file_path)
+            
             result = {"file": self.file_path, "vt": vt_res}
             if "hash" in vt_res:
                 result["hash"] = vt_res["hash"]
