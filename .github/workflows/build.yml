@@ -46,7 +46,8 @@ jobs:
         
         # Cleanup
         Remove-Item -Path "osquery.msi"
-        Remove-Item -Path "osq_temp" -Recycle -Force
+        # REPLACED -Recycle WITH -Recurse FOR PWSH COMPATIBILITY
+        Remove-Item -Path "osq_temp" -Recurse -Force
 
     - name: Bundle Executable with PyInstaller
       run: |
