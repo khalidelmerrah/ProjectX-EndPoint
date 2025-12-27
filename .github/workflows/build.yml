@@ -51,3 +51,21 @@ jobs:
         github-token: ${{ secrets.GITHUB_TOKEN }}
         wait-for-completion: true
         output-artifact-directory: 'dist/signed'
+
+    - name: Download OSQuery Binary
+      run: |
+        mkdir bin
+        # Fetch the official osquery MSIs from the repository
+        curl -L https://pkg.osquery.io/windows/osquery-5.10.2.msi -o osquery.msi
+        # Extract the binary using msiexec without installing the full package
+        msiexec /a osquery.msi /qb TARGETDIR=%CD%\temp_osquery
+        # Move the standalone shell to the expected bin/ directory
+        move "%CD%\temp_osquery\osquery\osqueryi.exe" "bin\osqueryi.exe"
+        # Cleanup temporary files
+        del osquery.msi
+        rmdir /s /q temp_osquery
+
+    - name: Bundle Executable with PyInstaller
+      run: |
+        # PyInstaller now finds the binary in the local bin/ folder
+        pyinstaller --noconfirm --onefile --windowed --name "ProjectX" --add-binary "bin/osqueryi.exe;bin" app.py
