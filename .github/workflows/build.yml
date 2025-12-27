@@ -29,17 +29,20 @@ jobs:
     - name: Fetch OSQuery Sidecar
       shell: pwsh
       run: |
-        # Create expected directory structure
+        # Create the bin directory explicitly
         New-Item -ItemType Directory -Force -Path bin
         
-        # Download official MSI
+        # Download the official MSI
         Invoke-WebRequest -Uri "https://pkg.osquery.io/windows/osquery-5.12.1.msi" -OutFile "osquery.msi"
         
-        # Administrative extraction to temporary directory
+        # Extract MSI contents to a temporary folder
         Start-Process msiexec.exe -Wait -ArgumentList "/a osquery.msi /qb TARGETDIR=$pwd\osq_temp"
         
-        # Relocate binary to path expected by managers.py and PyInstaller
+        # Move the binary to the bin folder expected by PyInstaller and managers.py
         Move-Item -Path "osq_temp\osquery\osqueryi.exe" -Destination "bin\osqueryi.exe" -Force
+        
+        # Verification: This will fail the build if the file is missing, providing a clear error
+        if (!(Test-Path "bin\osqueryi.exe")) { throw "osqueryi.exe not found after extraction!" }
         
         # Cleanup
         Remove-Item -Path "osquery.msi"
@@ -47,7 +50,7 @@ jobs:
 
     - name: Bundle Executable with PyInstaller
       run: |
-        # Source-to-Destination syntax: "source;destination" for Windows
+        # Note the specific "source;destination" syntax for Windows
         pyinstaller --noconfirm --onefile --windowed --name "ProjectX" --add-binary "bin/osqueryi.exe;bin" app.py
 
     - name: Upload Unsigned Artifact
@@ -66,5 +69,5 @@ jobs:
         signing_policy_slug: 'release-signing'
         github-artifact-id: ${{ steps.upload-unsigned-artifact.outputs.artifact-id }}
         github-token: ${{ secrets.GITHUB_TOKEN }}
-        wait-for-completion: true
+        wait_for_completion: true
         output-artifact-directory: 'dist/signed'
