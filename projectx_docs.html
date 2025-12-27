@@ -485,6 +485,40 @@ api_token = keyring.get_password("ProjectX", "SignPath_Token")</code></pre>
             </p>
         </section>
 
+        <section id="integrations">
+            <h2>6. Cloud Integrations (Offline-First Design)</h2>
+            <p>
+                ProjectX is designed to function as a standalone air-gapped security tool ("Offline Mode").
+                However, attaching cloud API keys unlocks advanced telemetry and analysis features.
+            </p>
+
+            <h3>6.1 NIST National Vulnerability Database (NVD)</h3>
+            <p>
+                Required for CVE correlation. Without this key, the "Vulnerabilities" scan will be skipped.
+                <br>
+                <a href="https://nvd.nist.gov/developers/request-an-api-key" target="_blank">Request NVD API Key</a>
+            </p>
+
+            <h3>6.2 Google Gemini AI (Generative Analysis)</h3>
+            <p>
+                Unlocks the "AI Analyze" button for processes and natural language explanations for alerts.
+                <br>
+                <a href="https://aistudio.google.com/app/apikey" target="_blank">Get Gemini API Key</a>
+            </p>
+
+            <h3>6.3 VirusTotal (Hash Reputation)</h3>
+            <p>
+                Used to verify file hashes against a global malware database.
+                <br>
+                <a href="https://www.virustotal.com/gui/join-us" target="_blank">Join VirusTotal Community</a>
+            </p>
+
+            <div class="alert">
+                <strong>Note:</strong> API Keys are stored securely in the OS Credential Locker (Windows CredMan)
+                and are never sent to ProjectX telemetry servers.
+            </div>
+        </section>
+
         <section id="visuals">
             <h2>6. Visual Framework</h2>
 

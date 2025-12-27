@@ -217,12 +217,16 @@ class ConfigManager:
         if key == "nist_api_key":
             val = self.get_key(SERVICE_NAME, "nist_api_key")
             if val: return val
+            # Graceful Degradation: Return empty string, do not crash
+            return ""
         if key == "vt_api_key":
              val = self.get_key(SERVICE_NAME, "vt_api_key")
              if val: return val
+             return ""
         if key == "gemini_api_key":
              val = self.get_key(SERVICE_NAME, "gemini_api_key")
              if val: return val
+             return ""
              
         # 2. Check JSON Config for standard settings
         cfg = self.load_config()
@@ -902,7 +906,7 @@ class VulnEngine:
         It retrieves the last 120 days of published CVEs.
         """
         if not self.api_key:
-            logging.warning("NIST API Key missing. Skipping real CVE Sync.")
+            logging.info("NIST API Key missing. Skipping CVE Sync (Offline Mode).")
             return 0
         try:
             # We fetch last 120 days to keep the database small but relevant
@@ -1069,11 +1073,18 @@ class AIAssistant:
         # Using the experimental Gemini 2.0 Flash endpoint for speed/cost balance
         self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={self.api_key}"
 
+    @property
+    def is_active(self) -> bool:
+        """Returns True if a valid API key is configured."""
+        return bool(self.api_key and len(self.api_key) > 5)
+
     def explain_vulnerability(self, title: str, description: str) -> str:
         """
         Asks AI to summarize a CVE and suggest fixes.
         """
         try:
+            if not self.is_active:
+                return "Feature unavailable: Gemini API key required in Settings."
             prompt = f"""
             You are a cybersecurity expert. Explain the following vulnerability simply.
             Title: {title}
@@ -1099,6 +1110,8 @@ class AIAssistant:
         Asks AI to explain why an open port is dangerous.
         """
         try:
+            if not self.is_active:
+                return "Feature unavailable: Gemini API key required in Settings."
             prompt = f"""
             Analyze this exposed service:
             Service: {service_info.get('process_name')}
@@ -1162,7 +1175,7 @@ class ThreatIntelManager:
         Queries VirusTotal API v3 using the file hash.
         """
         if not self.api_key:
-            return {"error": "No API Key"}
+            return {"error": "API Key Missing", "status": "Disabled"}
 
         file_hash = target
         if os.path.exists(target):

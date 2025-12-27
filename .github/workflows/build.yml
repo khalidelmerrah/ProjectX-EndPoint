@@ -9,6 +9,8 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    # Added environment to access your Environment Secrets
+    environment: production 
     
     steps:
     - name: Checkout Repository
@@ -29,29 +31,16 @@ jobs:
     - name: Fetch OSQuery Sidecar
       shell: pwsh
       run: |
-        # Create the bin directory explicitly
         New-Item -ItemType Directory -Force -Path bin
-        
-        # Download the official MSI
         Invoke-WebRequest -Uri "https://pkg.osquery.io/windows/osquery-5.12.1.msi" -OutFile "osquery.msi"
-        
-        # Extract MSI contents to a temporary folder
         Start-Process msiexec.exe -Wait -ArgumentList "/a osquery.msi /qb TARGETDIR=$pwd\osq_temp"
-        
-        # Move the binary to the bin folder expected by PyInstaller and managers.py
         Move-Item -Path "osq_temp\osquery\osqueryi.exe" -Destination "bin\osqueryi.exe" -Force
-        
-        # Verification: This will fail the build if the file is missing, providing a clear error
         if (!(Test-Path "bin\osqueryi.exe")) { throw "osqueryi.exe not found after extraction!" }
-        
-        # Cleanup
         Remove-Item -Path "osquery.msi"
-        # REPLACED -Recycle WITH -Recurse FOR PWSH COMPATIBILITY
         Remove-Item -Path "osq_temp" -Recurse -Force
 
     - name: Bundle Executable with PyInstaller
       run: |
-        # Note the specific "source;destination" syntax for Windows
         pyinstaller --noconfirm --onefile --windowed --name "ProjectX" --add-binary "bin/osqueryi.exe;bin" app.py
 
     - name: Upload Unsigned Artifact
@@ -67,8 +56,8 @@ jobs:
         api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
         organization-id: ${{ secrets.SIGNPATH_ORG_ID }}
         project-slug: 'ProjectX'
-        signing_policy_slug: 'release-signing'
+        signing-policy-slug: 'release-signing'
         github-artifact-id: ${{ steps.upload-unsigned-artifact.outputs.artifact-id }}
         github-token: ${{ secrets.GITHUB_TOKEN }}
-        wait_for_completion: true
+        wait-for-completion: true
         output-artifact-directory: 'dist/signed'

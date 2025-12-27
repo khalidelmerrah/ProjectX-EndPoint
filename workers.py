@@ -156,16 +156,20 @@ class ScanWorker(QThread):
         # -----------------------------------------------------
         # Synchronizes local definitions with NIST NVD.
         if self.is_cat('software') and not self.skip_cve_sync:
-            try:
-                self.progress.emit("Syncing CVE Database (NIST)...")
-                # This is a network-bound blocking call
-                self.vuln_engine.sync_cves() 
-                
-                # Yield control briefly (Good citizenship in threading)
-                time.sleep(0.1) 
-            except Exception as e:
-                logging.error(f"CVE Sync Failed: {e}")
-                self.progress.emit("CVE Sync Failed (Skipping)...")
+            # Graceful Degradation: Check if we even have a key before trying
+            if not self.vuln_engine.api_key:
+                self.progress.emit("Offline Mode: Skipping NIST CVE Sync (No Key)...")
+            else:
+                try:
+                    self.progress.emit("Syncing CVE Database (NIST)...")
+                    # This is a network-bound blocking call
+                    self.vuln_engine.sync_cves() 
+                    
+                    # Yield control briefly (Good citizenship in threading)
+                    time.sleep(0.1) 
+                except Exception as e:
+                    logging.error(f"CVE Sync Failed: {e}")
+                    self.progress.emit("CVE Sync Failed (Skipping)...")
 
         # -----------------------------------------------------
         # PHASE 2: Software Inventory (The "Asset Discovery")
@@ -348,6 +352,11 @@ class AIWorker(QThread):
         self.assistant = AIAssistant()
 
     def run(self):
+        # Graceful Guard: If no key, don't even try the network
+        if not self.assistant.is_active:
+             self.result.emit("Feature unavailable: Gemini API key required in Settings.")
+             return
+
         # Blocking HTTP/gRPC call handled here in background
         response = self.assistant.explain_risk(self.context_data)
         # Return result to UI via Signal

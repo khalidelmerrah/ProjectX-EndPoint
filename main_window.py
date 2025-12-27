@@ -275,7 +275,11 @@ class MainWindow(QMainWindow):
         # Connect the log handler signal to the text area
         self.log_handler.log_signal.connect(self.append_log)
         # Populate the dashboard tables
+        # Populate the dashboard tables
         self.refresh_dashboard_data()
+        
+        # [OFFLINE-FIRST] Apply UI constraints based on available keys
+        self.validate_feature_state()
 
     def setup_ui(self):
         """Constructs the high-level layout."""
@@ -375,9 +379,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.intel_table)
         
         # Controls
-        btn_refresh = QPushButton("Refresh Feed")
-        btn_refresh.clicked.connect(self.refresh_threat_feed)
-        layout.addWidget(btn_refresh)
+        self.btn_refresh = QPushButton("Refresh Feed")
+        self.btn_refresh.clicked.connect(self.refresh_threat_feed)
+        layout.addWidget(self.btn_refresh)
         
         # Add the constructed tab to the main widget
         self.main_tabs.addTab(tab, "Dashboard")
@@ -620,7 +624,39 @@ class MainWindow(QMainWindow):
         self.scan_worker = ScanWorker(scan_categories=categories)
         self.scan_worker.progress.connect(lambda s: self.status_bar.showMessage(s))
         self.scan_worker.finished.connect(lambda: [self.refresh_dashboard_data(), self.status_bar.showMessage("Scan Complete.")])
+        self.scan_worker.finished.connect(lambda: [self.refresh_dashboard_data(), self.status_bar.showMessage("Scan Complete.")])
         self.scan_worker.start()
+
+    def validate_feature_state(self):
+        """
+        [OFFLINE-FIRST] Disables UI features if API keys are missing.
+        Prevents user frustration by grey-ing out broken buttons.
+        """
+        cfg = ConfigManager.load_config()
+        
+        # 1. Gemini AI Analysis
+        if not cfg.get("gemini_api_key"):
+            self.btn_ai_analyze.setEnabled(False)
+            self.btn_ai_analyze.setToolTip("Feature locked. Add Gemini API key in Settings to enable.")
+        else:
+            self.btn_ai_analyze.setEnabled(True)
+            self.btn_ai_analyze.setToolTip("Analyze this process using Google Gemini AI.")
+
+        # 2. NIST Vulnerability Scanning
+        if not cfg.get("nist_api_key"):
+            # Disable the specific KPI card button (accessing internal layout is tricky, 
+            # so we might depend on the worker skipping it, or disable the main action if possible)
+            # For now, we update the main Scan Full action if we had one tied to a single button, 
+            # but here we'll just set a status message if they try.
+            # However, we DO have self.btn_refresh for the Feed.
+            self.btn_refresh.setEnabled(False)
+            self.btn_refresh.setToolTip("Feature locked. Add NIST/Vendor API key to enable.")
+        else:
+            self.btn_refresh.setEnabled(True)
+            self.btn_refresh.setToolTip("Refresh Threat Intelligence Feed.")
+
+        # 3. VirusTotal (If we had a specific button, we'd disable it too)
+
 
     def scan_software(self): self.run_scan(['software'])
     def scan_network(self): self.run_scan(['network'])
