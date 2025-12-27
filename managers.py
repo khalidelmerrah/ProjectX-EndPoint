@@ -1,216 +1,303 @@
 """
 MODULE: managers.py
-ProjectX Business Logic Layer
+================================================================================
+PROJECT:        ProjectX Endpoint Protection Platform (Academic Reference)
+AUTHOR:         ProjectX Development Team
+INSTITUTION:    University of Cybersecurity & Software Engineering
+DATE:           2025-12-27
+LICENSE:        MIT License (Educational)
+PYTHON VER:     3.11+
+================================================================================
 
-PURPOSE:
-This module contains the core "brain" of the application. It abstracts away 
-low-level OS interactions into high-level Python classes.
-It handles:
-1.  **Configuration**: Securely loading API keys using the OS Keychain.
-2.  **Inventory**: querying OSQuery, WMI, or Registry to find installed apps.
-3.  **Network**: Scanning active ports and connections.
-4.  **Vulnerability**: Matching software versions against the NVD CVE database.
-5.  **Intelligence**: Checking file hashes against VirusTotal.
-6.  **AI**: Interfacing with Gemini for natural language explanations.
-
-ARCHITECTURAL ROLE:
--------------------
-[Workers] --> [Managers] --> [Operating System / APIs]
-
-Workers (running in threads) instantiate these Managers to perform tasks.
-This separation allows us to test "Business Logic" independently of "Threading Logic" or "UI Logic".
-
-SECURITY THEORY:
+MODULE OVERVIEW:
 ----------------
-1.  **Least Privilege**: We try to use the least invasive method first (e.g., parsing a safe registry key)
-    before trying to spawn a sub-shell or run a binary as admin.
-2.  **Credential Safety**: We use `keyring` to store API keys. Storing secrets in plain text files 
-    (like .env or config.json) is a major security anti-pattern because malware often scrapes them.
-    The OS Keychain (Windows Credential Locker) is encrypted by the user's login password.
+This module contains the **Business Logic Layer** (the "Brain") of the application.
+It follows the **Service-Oriented Architecture (SOA)** pattern, where distinct
+functionalities (Inventory, Vulnerability Ops, Threat Intel) are encapsulated 
+in separate "Manager" classes.
 
-DEPENDENCIES:
--------------
-- osquery: A tool that exposes the OS as a relational database.
-- wmi: Windows Management Instrumentation (legacy but powerful).
-- winreg: Windows Registry access.
-- psutil: Cross-platform process and system monitoring.
-- keyring: Secure password storage.
-- requests: For API calls (NIST, VirusTotal, Gemini).
+DESIGN PATTERNS IMPLEMENTED:
+----------------------------
+1.  **Singleton / Monostate**:
+    While not strictly enforced via `__new__`, these classes are designed to be 
+    instantiated once and shared (conceptually) or are stateless enough to be 
+    transient.
 
-AUTHOR: ProjectX Team
-DATE: 2025-12-27
+2.  **Chain of Responsibility (Fallback Logic)**:
+    In `SoftwareManager`, we see a critical resilience pattern. The system attempts 
+    to fetch data from the most reliable source (OSQuery). If that fails (e.g., 
+    binary missing), it degrades gracefully to Windows Registry scans, and finally 
+    to WMI (Windows Management Instrumentation). 
+    *Principle: Security tools must function even in broken environments.*
+
+3.  **Sidecar Pattern (OSQuery Integration)**:
+    ProjectX does not re-invent the wheel. It leverages `osqueryi.exe` as a 
+    powerful subprocess ("Sidecar") to query the OS like a database. 
+    This decouples the "Data Collection" (C++) from the "Analysis" (Python).
+
+4.  **Secure Configuration Management**:
+    The `ConfigManager` prioritizes OS-level Keychains (Windows Credential Locker) 
+    over plaintext files for storing sensitive API keys. This is a baseline 
+    requirement for any security software.
+
+KEY COMPONENTS:
+---------------
+-   `ConfigManager`: Handles persistence of settings and secrets (Keyring).
+-   `OSQueryClient`: Wrapper for IPC (stdIO) with the OSQuery table explorer.
+-   `SoftwareManager`: Aggregates software inventory from multiple sources.
+-   `VulnEngine`: Correlates inventory with NIST NVD CVE data (the "Matcher").
+-   `YaraManager`: Compiles and executes YARA rules for signature matching.
+-   `AIAssistant`: Connects to LLMs (Gemini) to explain alerts to users.
+-   `ResponseManager`: Active defense capabilities (Kill Process, Firewall Block).
+
 """
 
-import platform     # OS Detection
-import subprocess   # To run external binaries (osqueryi)
-import socket       # Network primitives
-import logging      # Error logging
-import psutil       # System Monitoring
+import sys          # System-specific parameters and functions
+import os           # Operating system interfaces (Paths, FS)
+import subprocess   # Spawning new processes, connecting to input/output pipes
+import json         # JSON encoder and decoder
+import logging      # Event logging system
+import platform     # Access to underlying platform's identifying data
+import datetime     # Basic date and time types
+import hashlib      # Secure hash and message digest algorithms
+import socket       # Low-level networking interface
 from typing import List, Dict, Any, Optional
-import datetime     # Timestamps
-import os           # File system
-import requests     # HTTP Client
-import sys          # System info
-import json         # parsing osquery JSON output
-import hashlib      # For calculating file SHA256 hashes
+from dateutil import parser # Robust date parsing library
 
-# ---------------------------------------------------------
-# OPTIONAL IMPORTS (Hardware Specific)
-# ---------------------------------------------------------
+# ------------------------------------------------------------------------------
+# THIRD-PARTY DEPENDENCIES
+# ------------------------------------------------------------------------------
+# We adhere to "Defensive Importing". 
+# If a non-critical library is missing, we catch the import error and disable 
+# the feature rather than crashing the entire application.
 
-# WMI is Windows-only. We Wrap it in a try-block so the code doesn't crash on Linux/Mac.
+# PSUTIL: Cross-platform process and system monitoring
 try:
-    import wmi
+    import psutil
 except ImportError:
-    wmi = None
+    logging.critical("CRITICAL: 'psutil' library missing. System monitoring disabled.")
+    psutil = None
 
-# Secure Credential Storage
-import keyring
+# REQUESTS: HTTP Library for Humans (used for API calls)
+try:
+    import requests
+except ImportError:
+    logging.critical("CRITICAL: 'requests' library missing. Cloud features disabled.")
+    requests = None
 
-# YARA is an optional dependency for rule compilation
+# KEYRING: Secure Password Storage (Windows Credential Manager / macOS Keychain)
+try:
+    import keyring
+except ImportError:
+    logging.warning("WARNING: 'keyring' not found. API keys will verify insecurely if not handled.")
+    keyring = None
+
+# YARA: The pattern matching swiss knife for malware researchers
 try:
     import yara
 except ImportError:
+    logging.warning("WARNING: 'yara-python' not found. Signature scanning disabled.")
     yara = None
 
+# WMI: Windows Management Instrumentation (Windows Only)
+try:
+    import wmi
+except ImportError:
+    # This is expected on Linux/macOS
+    logging.info("INFO: 'wmi' module not found (Non-Windows or missing).")
+    wmi = None
 
-# ---------------------------------------------------------
-# CONFIGURATION MANAGER
-# ---------------------------------------------------------
+# ------------------------------------------------------------------------------
+# CONSTANTS & CONFIGURATION
+# ------------------------------------------------------------------------------
+CONFIG_FILE = "config.json"       # Stored in the application root
+SERVICE_NAME = "ProjectX_Secure" # Namespace for Keyring storage
 
+# ------------------------------------------------------------------------------
+# CLASS: ConfigManager
+# ------------------------------------------------------------------------------
 class ConfigManager:
     """
-    Manages application configuration and secure credential storage.
+    Manages application configuration and sensitive secrets.
     
-    Pedagogical Note:
-    Hardcoding API keys is bad. Storing them in 'config.json' is better, but still risky
-    (malware reads files). Using the OS Keychain (`keyring` library) is the Best Practice.
-    It delegates encryption to the Operating System.
+    Security Principle: Separation of Secrets.
+    Non-sensitive configuration (UI themes, boolean flags) goes into a JSON file.
+    Sensitive secrets (API Keys) go into the OS Secure Storage (Keyring).
     """
-    SERVICE_ID = "ProjectX_Desktop"
-    KEYS = ["nist_api_key", "gemini_api_key", "vt_api_key", "safe_mode"]
 
     @staticmethod
-    def load_config() -> Dict[str, str]:
+    def load_config() -> Dict[str, Any]:
         """
-        Loads API keys from the secure credential store.
-        Returns:
-            dict: { 'nist_api_key': '...', ... }
+        Loads the JSON configuration file from disk.
+        Returns empty dict if file is missing or corrupt.
         """
-        config = {}
-        for key in ConfigManager.KEYS:
+        if not os.path.exists(CONFIG_FILE):
+             return {}
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            logging.error(f"Config corruption detected: {e}")
+            return {}
+
+    @staticmethod
+    def save_config(data: Dict[str, Any]):
+        """
+        Persists the JSON configuration to disk.
+        
+        Args:
+            data (dict): The configuration dictionary.
+        """
+        try:
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(data, f, indent=4) # Indent for human readability
+        except IOError as e:
+            logging.error(f"Failed to write config: {e}")
+
+    @staticmethod
+    def set_key(service: str, username: str, password: str):
+        """
+        Securely stores a secret using the OS Keyring.
+        
+        Why Keyring?
+        Storing API keys in `config.json` is a security vulnerability.
+        Malware exfiltrating files would steal the keys. 
+        Keyring encrypts them using the User's Windows Login credentials.
+        """
+        if keyring:
             try:
-                # get_password(service, username) -> returns password string or None
-                val = keyring.get_password(ConfigManager.SERVICE_ID, key)
-                config[key] = val if val else ""
+                keyring.set_password(service, username, password)
             except Exception as e:
-                logging.error(f"Keyring load error for {key}: {e}")
-                config[key] = ""
-        return config
+                logging.error(f"Keyring Write Error: {e}")
+        else:
+            # Fallback for environments without keyring (e.g., some CI runners)
+            # CAUTION: This is insecure, but necessary for compatibility.
+            config = ConfigManager.load_config()
+            config[f"{service}_{username}"] = password
+            ConfigManager.save_config(config)
 
     @staticmethod
-    def save_config(data: Dict[str, str]):
-        """
-        Saves API keys to the secure credential store.
-        """
-        for key in ConfigManager.KEYS:
-            if key in data:
-                try:
-                    keyring.set_password(ConfigManager.SERVICE_ID, key, data[key])
-                except Exception as e:
-                    logging.error(f"Keyring save error for {key}: {e}")
+    def get_key(service: str, username: str) -> str:
+        """Retrieves a secret from the OS Keyring."""
+        if keyring:
+            try:
+                val = keyring.get_password(service, username)
+                return val if val else ""
+            except Exception:
+                return ""
+        else:
+            config = ConfigManager.load_config()
+            return config.get(f"{service}_{username}", "")
 
-# ---------------------------------------------------------
-# OSQUERY WRAPPER
-# ---------------------------------------------------------
+    # Convenience Wrappers for Specific API Keys
+    def get(self, key: str, default: Any = None):
+        """Facade for retrieving values, abstracting the storage backend."""
+        # 1. Check Keyring for known secrets
+        if key == "nist_api_key":
+            val = self.get_key(SERVICE_NAME, "nist_api_key")
+            if val: return val
+        if key == "vt_api_key":
+             val = self.get_key(SERVICE_NAME, "vt_api_key")
+             if val: return val
+        if key == "gemini_api_key":
+             val = self.get_key(SERVICE_NAME, "gemini_api_key")
+             if val: return val
+             
+        # 2. Check JSON Config
+        cfg = self.load_config()
+        return cfg.get(key, default)
 
+# ------------------------------------------------------------------------------
+# CLASS: OSQueryClient
+# ------------------------------------------------------------------------------
 class OSQueryClient:
     """
-    Wrapper for interacting with the 'osqueryi' binary.
+    Interface to the OSQuery binary.
     
-    What is OSQuery?
-    It is a tool created by Facebook that allows you to treat the Operating System 
-    as a relational database. You can run SQL queries like:
-    `SELECT * FROM active_processes WHERE name = 'malware.exe'`
-    This is much easier and safer than writing complex C++ or parsing raw system files.
+    Architecture:
+    OSQuery acts as a "Sidecar" process. We spawn it in interactive mode (`-i`)
+    and communicate via Standard Input/Output (stdin/stdout).
+    This allows us to treat the Operating System as a Relational Database (SQL).
     """
+    
     def __init__(self):
         self.available = False
-        self.binary_path = "osqueryi"
+        self.binary_path = "osqueryi" # Default: assume in System PATH
         
-        # Strategy: Find the binary
-        # 1. Check Bundled Path (if packaged with PyInstaller)
-        # 2. Check Local 'bin' folder (for dev)
-        # 3. Check System PATH (if installed globally)
+        # ----------------------------------------------------------------------
+        # PATH INTEGRITY & PYINSTALLER COMPATIBILITY
+        # ----------------------------------------------------------------------
+        # When compiling to a standalone EXE (Frozen), external assets like binaries
+        # are unpacked into a temporary temp folder (`sys._MEIPASS`).
+        # We must detect this to find `osqueryi.exe`.
         
-        # getattr(sys, '_MEIPASS', ...) handles PyInstaller's temporary temp folder extraction
-        base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-        
-        bundled_paths = [
-            os.path.join(base_path, 'bin', 'osqueryi.exe'),
-            os.path.join(base_path, '..', 'bin', 'osqueryi.exe'),
-            os.path.join(os.getcwd(), 'bin', 'osqueryi.exe')
-        ]
-        
-        for p in bundled_paths:
-            if os.path.exists(p):
-                self.binary_path = p
-                self.available = True
-                logging.info(f"OSQuery found (Bundled) at {p}")
-                return # Stop searching
-        
-        # Fallback: Check System PATH
-        try:
-            # subprocess.CREATE_NO_WINDOW hides the black command prompt window on Windows
-            creation_flags = subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
+        if getattr(sys, 'frozen', False):
+            # APP IS FROZEN (Running as EXE)
+            base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+            # We bundled osqueryi.exe in the 'bin' submenu of the bundle.
+            bundled_path = os.path.join(base_path, 'bin', 'osqueryi.exe')
             
-            # Just run version check to see if it exists
-            subprocess.run(["osqueryi", "--version"], capture_output=True, creationflags=creation_flags)
-            self.binary_path = "osqueryi"
-            self.available = True
-            logging.info("OSQuery found in PATH.")
-            return
-        except FileNotFoundError:
-            pass
-
-        # Fallback: Hardcoded common paths
-        possible_paths = [
-            r"C:\Program Files\osquery\osqueryi.exe",
-            r"C:\Program Files\Facebook\osquery\osqueryi.exe"
-        ]
-        for p in possible_paths:
-            if os.path.exists(p):
-                self.binary_path = p
+            if os.path.exists(bundled_path):
+                self.binary_path = bundled_path
                 self.available = True
-                logging.info(f"OSQuery found via fallback at {p}")
+                logging.info(f"OSQuery (Bundled) found at: {bundled_path}")
                 return
-        
-        if not self.available:
-            logging.warning("osqueryi binary not found. Functionality will be degraded (using Fallbacks).")
+            else:
+                logging.error(f"OSQuery bundle expected at {bundled_path} but missing!")
 
-    def query(self, sql: str) -> List[Dict]:
+        # ----------------------------------------------------------------------
+        # DEVELOPMENT MODE (Running from Source)
+        # ----------------------------------------------------------------------
+        # Check local 'bin' folder first
+        local_bin = os.path.join(os.getcwd(), 'bin', 'osqueryi.exe')
+        if os.path.exists(local_bin):
+            self.binary_path = local_bin
+            self.available = True
+            logging.info(f"OSQuery (Local) found at: {local_bin}")
+            return
+            
+        # Check System PATH as fallback
+        try:
+            # We use '--version' as a lightweight "Ping" to check existence
+            subprocess.run([self.binary_path, "--version"], 
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            self.available = True
+            logging.info("OSQuery found in System PATH")
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            logging.warning("OSQuery not found. Some features will be disabled.")
+            self.available = False
+
+    def query(self, sql: str) -> List[Dict[str, Any]]:
         """
-        Executes a raw SQL query against the OS.
+        Executes a SQL query against the OS.
+        
         Args:
-            sql (str): standard SQL (e.g., 'SELECT * FROM users')
+            sql (str): SQL statement (e.g. "SELECT * FROM users")
+            
         Returns:
-            list: List of dictionaries (rows)
+            List[Dict]: A list of dictionaries representing the rows.
         """
         if not self.available:
             return []
+            
         try:
-            # We call the binary with '--json' flag to get parsed output
+            # EXECUTION STRATEGY:
+            # We pass the SQL query and request JSON output format.
+            # timeout=10 prevents hanging if OSQuery freezes.
             cmd = [self.binary_path, "--json", sql]
             
-            creation_flags = subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
+            # Windows: Hide the console window for the subprocess
+            startupinfo = None
+            if platform.system() == "Windows":
+                 startupinfo = subprocess.STARTUPINFO()
+                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             
             result = subprocess.run(
                 cmd, 
                 capture_output=True, 
                 text=True, 
-                encoding='utf-8',
-                creationflags=creation_flags,
-                timeout=10 # Security: Don't let a query hang forever
+                timeout=10,
+                startupinfo=startupinfo
             )
             
             if result.returncode == 0:
@@ -219,22 +306,21 @@ class OSQueryClient:
                 except json.JSONDecodeError:
                     return []
             else:
-                logging.error(f"OSQuery Error ({result.returncode}): {result.stderr}")
+                logging.error(f"OSQuery failed: {result.stderr}")
                 return []
         except Exception as e:
-            logging.error(f"OSQuery Execution Exception: {e}")
+            logging.error(f"OSQuery execution error: {e}")
             return []
 
-# Instantiate a global shared client
+# Initialize the global client instance
 osq_client = OSQueryClient()
 
-# ---------------------------------------------------------
-# SYSTEM INVENTORY MANAGER
-# ---------------------------------------------------------
-
-class InventoryManager:
+# ------------------------------------------------------------------------------
+# CLASS: SoftwareManager
+# ------------------------------------------------------------------------------
+class SoftwareManager:
     """
-    The 'Collector'. Aggregates data from multiple sources.
+    Aggregates installed software inventory.
     
     Pattern: Chain of Responsibility / Fallback
     It tries the best source (OSQuery) first. If that fails or is missing,
@@ -244,11 +330,13 @@ class InventoryManager:
     def get_installed_software(self) -> List[Dict[str, Any]]:
         """
         Returns a list of installed applications.
-        Critical for Vulnerability Management (knowing what you have).
+        Critical for Vulnerability Management (Search installed apps vs NVD).
         """
         software_list = []
         
-        # METHOD A: OSQuery (Fastest & Cleanest)
+        # ----------------------------------------------------------------------
+        # METHOD A: OSQuery "programs" table (Fastest & Most Reliable)
+        # ----------------------------------------------------------------------
         if osq_client.available:
             logging.info("Using OSQuery (Direct) for Software Inventory...")
             data = osq_client.query("SELECT name, version, publisher, install_date FROM programs")
@@ -268,8 +356,10 @@ class InventoryManager:
             else:
                 logging.warning("OSQuery returned 0 apps. Falling back to Registry...")
 
-        # METHOD B: Windows Registry (The "Old School" way)
-        # Windows stores uninstall info in specific Registry keys.
+        # ----------------------------------------------------------------------
+        # METHOD B: Windows Registry (The "Classic" Manual Method)
+        # ----------------------------------------------------------------------
+        # Windows stores uninstall strings in HKLM and HKCU hives.
         try:
             import winreg
             logging.info("Scanning Windows Registry for Software...")
@@ -281,25 +371,25 @@ class InventoryManager:
                 except FileNotFoundError:
                     return ""
 
-            # The 3 locations where software usually registers itself
+            # The 3 canonical locations (64-bit, 32-bit WoW64, User-specific)
             registry_paths = [
                 (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
-                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"), # 32-bit apps on 64-bit OS
-                (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall") # Per-user apps
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"), 
+                (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall") 
             ]
             
-            seen_names = set() # Dedup set
+            seen_names = set() # De-duplication set (some apps exist in multiple keys)
 
             for root, path in registry_paths:
                 try:
                     with winreg.OpenKey(root, path) as key:
-                        # Iterate subkeys (folders)
+                        # Iterate subkeys (one subkey per application)
                         for i in range(winreg.QueryInfoKey(key)[0]):
                             try:
                                 subkey_name = winreg.EnumKey(key, i)
                                 with winreg.OpenKey(key, f"{path}\\{subkey_name}") as subkey:
                                     name = get_val(subkey, "DisplayName")
-                                    # Filter out garbage entries
+                                    # Filter: Ignore entries without display names
                                     if not name or name in seen_names: 
                                         continue
                                     
@@ -329,12 +419,14 @@ class InventoryManager:
         except Exception as e:
             logging.error(f"Registry Scan Error: {e}")
 
+        # ----------------------------------------------------------------------
         # METHOD C: WMI (Last Resort - Very Slow)
+        # ----------------------------------------------------------------------
+        # querying Win32_Product is discouraged by Microsoft (can trigger MSI self-repair).
         if wmi:
             try:
                 logging.info("Falling back to WMI for Software Inventory...")
                 c = wmi.WMI()
-                # Win32_Product is notorious for being slow and triggering MSI consistency checks
                 for product in c.Win32_Product(['Name', 'Version', 'Vendor', 'InstallDate']):
                     software_list.append({
                         'name': product.Name,
@@ -353,7 +445,7 @@ class InventoryManager:
     def get_startup_items(self) -> List[Dict[str, Any]]:
         """
         Scans for Persistence Mechanisms (Autoruns).
-        Malware usually places itself here to survive reboots.
+        Attackers use these keys to ensure malware runs on every reboot.
         """
         items = []
         if osq_client.available:
@@ -391,7 +483,7 @@ class InventoryManager:
         return items
 
     def get_system_health(self):
-        """Returns simple CPU/RAM usage stats using psutil."""
+        """Returns simple CPU/RAM usage stats using psutil (Polling)."""
         health = {
             "cpu": {},
             "ram": {},
@@ -399,7 +491,8 @@ class InventoryManager:
         }
         try:
             # CPU
-            health["cpu"]["percent"] = psutil.cpu_percent(interval=None) # Non-blocking
+            # interval=None makes it non-blocking (returns immediate last val)
+            health["cpu"]["percent"] = psutil.cpu_percent(interval=None) 
             health["cpu"]["count"] = psutil.cpu_count(logical=True)
             
             # RAM
@@ -425,7 +518,7 @@ class InventoryManager:
         return health
 
     def get_system_metadata(self):
-        """Gets BIOS date and OS Install date to calculate 'Hardware Age' and 'OS Freshness'."""
+        """Gets BIOS date and OS Install date to calculate 'System Freshness'."""
         meta = {"os_install_date": "", "bios_date": ""}
         if osq_client.available:
             try:
@@ -434,7 +527,7 @@ class InventoryManager:
                     meta["os_install_date"] = data[0].get("install_date", "")
             except: pass
         
-        # Fallback to WMI if missing (Windows)
+        # Fallback to WMI
         if not meta["bios_date"] and wmi:
             try:
                 c = wmi.WMI()
@@ -464,6 +557,7 @@ class InventoryManager:
         try:
             for service in psutil.win_service_iter():
                 try:
+                    # 'as_dict' is expensive, use selective attributes
                     info = service.as_dict(attrs=['name', 'display_name', 'status', 'start_type'])
                     services.append({
                         'name': info['name'],
@@ -475,7 +569,6 @@ class InventoryManager:
                     continue
         except AttributeError:
              pass # Not on Windows
-
         return services
 
     def get_users(self) -> List[Dict[str, Any]]:
@@ -522,7 +615,7 @@ class InventoryManager:
     # --- Phase 2 Telemetry Methods (Enrichment) ---
     
     def get_crashes(self) -> List[Dict]:
-        """Gets recent application crash logs (WER)."""
+        """Gets recent application crash logs (Windows Error Reporting - WER)."""
         if not osq_client.available: return []
         data = osq_client.query("SELECT crash_path, module, type FROM windows_crashes LIMIT 10")
         crashes = []
@@ -549,7 +642,7 @@ class InventoryManager:
         return res
 
     def get_windows_updates(self) -> List[Dict]:
-        """Gets history of installed windows patches (Hotfixes)."""
+        """Gets history of installed Windows patches (Hotfixes)."""
         if not osq_client.available: return []
         data = osq_client.query("SELECT title, description, date FROM windows_update_history LIMIT 20")
         res = []
@@ -563,7 +656,7 @@ class InventoryManager:
         return res
 
     def get_battery_status(self) -> List[Dict]:
-        """Battery health for laptops."""
+        """Battery health for laptops (power management)."""
         if not osq_client.available: return []
         data = osq_client.query("SELECT * FROM battery")
         if not data: return []
@@ -580,7 +673,7 @@ class InventoryManager:
     def get_browser_extensions(self) -> List[Dict]:
         """
         Lists installed browser extensions.
-        Extensions are a common vector for Adware/Spyware.
+        Extensions are a common vector for Adware/Spyware injection.
         """
         if not osq_client.available: return []
         res = []
@@ -595,7 +688,10 @@ class InventoryManager:
         return res
 
     def get_drivers(self) -> List[Dict]:
-        """Lists kernel drivers. Focus on UNSIGNED drivers."""
+        """
+        Lists kernel drivers. 
+        Focus is on UNSIGNED drivers, which are often rootkits or poorly written legacy code.
+        """
         if not osq_client.available: return []
         data = osq_client.query("SELECT description, provider, signed, image FROM drivers LIMIT 100") 
         res = []
@@ -610,7 +706,10 @@ class InventoryManager:
         return res
 
     def get_hosts_file(self) -> List[Dict]:
-        """Reads /etc/hosts (or C:\\Windows\\System32\\drivers\\etc\\hosts)."""
+        """
+        Reads /etc/hosts (or C:\\Windows\\System32\\drivers\\etc\\hosts).
+        Malware modifies this to redirect banking sites to phishing servers.
+        """
         if not osq_client.available: return []
         data = osq_client.query("SELECT hostnames, address FROM etc_hosts")
         res = []
@@ -621,14 +720,14 @@ class InventoryManager:
             })
         return res
 
-# ---------------------------------------------------------
-# CERTIFICATE MANAGER
-# ---------------------------------------------------------
-
+# ------------------------------------------------------------------------------
+# CLASS: CertificateManager
+# ------------------------------------------------------------------------------
 class CertificateManager:
     """
     Manages inspection of system certificates.
-    Useful for detecting malicious root certificates installed by bad actors (MitM attacks).
+    Useful for detecting malicious root certificates installed by attackers to 
+    perform Man-in-the-Middle (MitM) attacks on SSL/TLS traffic.
     """
     def get_certificates(self) -> List[Dict[str, str]]:
         certs = []
@@ -643,16 +742,16 @@ class CertificateManager:
                  })
         return certs
 
-# ---------------------------------------------------------
-# NETWORK SCANNER
-# ---------------------------------------------------------
-
+# ------------------------------------------------------------------------------
+# CLASS: NetworkScanner
+# ------------------------------------------------------------------------------
 class NetworkScanner:
     """
     Monitors active network connections and listening ports.
+    Equivalent to running `netstat -ano` but programmatic.
     """
     def scan_connections(self) -> List[Dict[str, Any]]:
-        """Returns list of active sockets (TCP/UDP)."""
+        """Returns list of active sockets (TCP/UDP) with Process attribution."""
         if osq_client.available:
             sql = "SELECT p.pid, p.name, s.local_address, s.local_port, s.remote_address, s.remote_port, s.state, s.protocol FROM process_open_sockets s JOIN processes p ON s.pid = p.pid WHERE s.family = 2"
             results = osq_client.query(sql)
@@ -690,7 +789,10 @@ class NetworkScanner:
         return connections
 
     def get_listening_ports(self) -> List[Dict[str, Any]]:
-        """Returns list of ports currently listening for incoming connections."""
+        """
+        Returns list of ports currently listening for incoming connections.
+        Open ports are potential entry points for attackers.
+        """
         if osq_client.available:
             sql = "SELECT p.pid, p.name, p.uid, l.port, l.protocol FROM listening_ports l JOIN processes p ON l.pid = p.pid"
             results = osq_client.query(sql)
@@ -734,10 +836,9 @@ class NetworkScanner:
         except: pass
         return listening
 
-# ---------------------------------------------------------
-# PROCESS MONITOR
-# ---------------------------------------------------------
-
+# ------------------------------------------------------------------------------
+# CLASS: ProcessMonitor
+# ------------------------------------------------------------------------------
 class ProcessMonitor:
     """
     Monitors running system processes.
@@ -745,10 +846,12 @@ class ProcessMonitor:
     """
     def get_running_processes(self) -> List[Dict[str, Any]]:
         procs = []
-        # 'process_iter' is preferred over 'pids' as it is atomic and efficient
+        # 'process_iter' is preferred over 'pids' as it is atomic and efficient.
+        # It creates a generator that yields processes one by one.
         for proc in psutil.process_iter(['pid', 'name', 'exe', 'memory_info', 'cpu_percent', 'username', 'create_time']):
             try:
                 pinfo = proc.info
+                # Convert bytes to Megabytes (MB)
                 mem_info = pinfo.get('memory_info')
                 mem_mb = (mem_info.rss / (1024 * 1024)) if mem_info else 0.0
                 
@@ -762,15 +865,15 @@ class ProcessMonitor:
                     'start_time': datetime.datetime.fromtimestamp(pinfo['create_time']).strftime("%Y-%m-%d %H:%M:%S") if pinfo.get('create_time') else ""
                 })
             except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError):
+                # Processes die quickly; if one vanishes during iteration, we skip it.
                 continue
             except Exception as e:
                 logging.error(f"Process Monitor Error: {e}")
         return procs
 
-# ---------------------------------------------------------
-# VULNERABILITY ENGINE
-# ---------------------------------------------------------
-
+# ------------------------------------------------------------------------------
+# CLASS: VulnEngine
+# ------------------------------------------------------------------------------
 class VulnEngine:
     """
     Core engine for vulnerability detection.
@@ -784,6 +887,9 @@ class VulnEngine:
     def sync_cves(self) -> int:
         """
         Connects to NIST NVD API 2.0 to download recent vulnerabilities.
+        
+        Note: This is an expensive operation (Network + Parsing).
+        It retrieves the last 120 days of published CVEs.
         """
         if not self.api_key:
             logging.warning("NIST API Key missing. Skipping real CVE Sync.")
@@ -793,6 +899,7 @@ class VulnEngine:
             end_date = datetime.datetime.now()
             start_date = end_date - datetime.timedelta(days=120)
             
+            # NIST required ISO 8601 format
             pub_start = start_date.strftime("%Y-%m-%dT%H:%M:%S.000")
             pub_end = end_date.strftime("%Y-%m-%dT%H:%M:%S.000")
             
@@ -823,7 +930,7 @@ class VulnEngine:
                     cve_id = cve.get('id')
                     desc = cve.get('descriptions', [{}])[0].get('value', 'No description')
                     
-                    # Score Extraction (Try V3.1 -> V3.0 -> V2)
+                    # Score Extraction (Support V3.1 -> V3.0 -> V2)
                     metrics = cve.get('metrics', {})
                     score = 0.0
                     if 'cvssMetricV31' in metrics:
@@ -846,7 +953,7 @@ class VulnEngine:
                 if start_index >= total_results:
                     break
                     
-                # Rate Limiting (NIST requires pauses)
+                # Rate Limiting (NIST requires pauses between pages)
                 import time
                 time.sleep(2) 
             
@@ -858,7 +965,11 @@ class VulnEngine:
     def match_vulnerabilities(self, software_list: List[Dict]) -> List[Dict]:
         """
         Cross-references installed software with the CVE cache.
-        Algorithm: String Matching (Naive but effective for demo).
+        Algorithm: Naive String Matching (O(N*M)).
+        
+        Optimization Note:
+        In a production system, CPE (Common Platform Enumeration) matching would be used.
+        Here, we fuzzy match the software name inside the CVE description for simplicity.
         """
         matches = []
         if not self.cached_cves:
@@ -866,10 +977,10 @@ class VulnEngine:
         
         for sw in software_list:
             sw_name = sw.get('name', '').lower()
-            if len(sw_name) < 4: continue 
+            if len(sw_name) < 4: continue # Skip short names to reduce False Positives
             
             for cve in self.cached_cves:
-                # Naive Fuzzy Match: check if software name is inside the CVE description
+                # Matching Logic: Is 'adobereader' in 'cve-2023-xyz description'?
                 if sw_name in cve.get('description', '').lower():
                      matches.append({
                          "software_id": sw.get("id"),
@@ -880,14 +991,13 @@ class VulnEngine:
                      })
         return matches
 
-# ---------------------------------------------------------
-# YARA MANAGER
-# ---------------------------------------------------------
-
+# ------------------------------------------------------------------------------
+# CLASS: YaraManager
+# ------------------------------------------------------------------------------
 class YaraManager:
     """
     Manages YARA rule compilation and file scanning.
-    YARA is the industry standard for malware pattern matching.
+    YARA is the industry standard for pattern-based malware classification.
     """
     def __init__(self, rules_dir="rules"):
         self.rules = None
@@ -897,24 +1007,21 @@ class YaraManager:
     def compile_rules(self):
         """Compiles all .yar files in the directory into a single optimized Rules object."""
         if not yara:
-            logging.warning("YARA not installed.")
+            logging.warning("YARA not installed (Import Error).")
             return
 
         if not os.path.exists(self.rules_dir):
             try:
                 os.makedirs(self.rules_dir)
-                # Create a harmless dummy rule so compilation doesn't fail
-                dummy_rule = """
-rule Dummy {
-    condition: false
-}
-"""
+                # Create a harmless dummy rule so compilation doesn't fail on empty dir
+                dummy_rule = "rule Dummy { condition: false }"
                 with open(os.path.join(self.rules_dir, "dummy.yar"), "w") as f:
                     f.write(dummy_rule)
             except Exception as e:
                 logging.error(f"Failed to create rules dir: {e}")
 
         filepaths = {}
+        # Walk directory to find all .yar files
         for root, dirs, files in os.walk(self.rules_dir):
             for file in files:
                 if file.endswith(".yar") or file.endswith(".yara"):
@@ -922,6 +1029,7 @@ rule Dummy {
         
         if filepaths:
             try:
+                # Compilation checks syntax of all files at once
                 self.rules = yara.compile(filepaths=filepaths)
                 logging.info(f"Compiled {len(filepaths)} YARA rules.")
             except Exception as e:
@@ -933,28 +1041,29 @@ rule Dummy {
             return []
         try:
             matches = self.rules.match(file_path)
-            # Match objects need to be converted to something serializable usually, 
-            # but we return matches objects here and let the worker process them.
             return matches
         except Exception as e:
+            # We fail silently here for individual files to avoid log spam
             return []
 
-# ---------------------------------------------------------
-# AI ASSISTANT MANAGER
-# ---------------------------------------------------------
-
+# ------------------------------------------------------------------------------
+# CLASS: AIAssistant
+# ------------------------------------------------------------------------------
 class AIAssistant:
     """
     Interface for Generative AI (Google Gemini).
-    Translates technical alerts into plain English instructions.
+    Translates technical alerts (JSON/Logs) into plain English instructions for the user.
     """
     def __init__(self, api_key: str = ""):
         self.config = ConfigManager.load_config()
         self.api_key = self.config.get("gemini_api_key", "")
-        # Using the Gemini 1.5/2.0 Flash/Pro endpoint
+        # Using the experimental Gemini 2.0 Flash endpoint for speed/cost balance
         self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={self.api_key}"
 
     def explain_vulnerability(self, title: str, description: str) -> str:
+        """
+        Asks AI to summarize a CVE and suggest fixes.
+        """
         try:
             prompt = f"""
             You are a cybersecurity expert. Explain the following vulnerability simply.
@@ -977,6 +1086,9 @@ class AIAssistant:
             return f"AI Service Unavailable: {e}"
 
     def explain_exposure(self, service_info: dict, risk_reasons: str) -> str:
+        """
+        Asks AI to explain why an open port is dangerous.
+        """
         try:
             prompt = f"""
             Analyze this exposed service:
@@ -1000,7 +1112,7 @@ class AIAssistant:
             return f"AI Unavailable: {e}"
 
     def explain_risk(self, context_data: Dict) -> str:
-        """Dispatcher method used by the worker."""
+        """Dispatcher method used by the worker to route requests based on type."""
         risk_type = context_data.get('type', 'general')
         if risk_type == 'cve':
             return self.explain_vulnerability(context_data.get('title',''), context_data.get('description',''))
@@ -1009,18 +1121,18 @@ class AIAssistant:
         else:
             return f"Risk Analysis for {risk_type}"
 
-# ---------------------------------------------------------
-# THREAT INTEL MANAGER
-# ---------------------------------------------------------
-
+# ------------------------------------------------------------------------------
+# CLASS: ThreatIntelManager
+# ------------------------------------------------------------------------------
 class ThreatIntelManager:
     """
     Connects to external Threat Intelligence APIs (VirusTotal).
     """
     def __init__(self):
         self.config = ConfigManager.load_config()
-        # Fallback to Gemini Key if VT key missing (sometimes users reuse keys, though incorrect)
         self.api_key = self.config.get("vt_api_key", "") 
+        # Fallback to Gemini Key is not technically correct but sometimes done by users.
+        # We prefer a dedicated key.
 
     @staticmethod
     def get_file_hash(path):
@@ -1028,7 +1140,7 @@ class ThreatIntelManager:
         sha256_hash = hashlib.sha256()
         try:
             with open(path, "rb") as f:
-                # Read 4KB chunks
+                # Read 4KB chunks to avoid loading large files into RAM
                 for byte_block in iter(lambda: f.read(4096), b""):
                     sha256_hash.update(byte_block)
             return sha256_hash.hexdigest()
@@ -1038,7 +1150,7 @@ class ThreatIntelManager:
 
     def check_virustotal(self, target):
         """
-        Queries VirusTotal API v3.
+        Queries VirusTotal API v3 using the file hash.
         """
         if not self.api_key:
             return {"error": "No API Key"}
@@ -1061,26 +1173,27 @@ class ThreatIntelManager:
                 stats['hash'] = file_hash
                 return stats
             elif response.status_code == 404:
+                # 404 on VT means "Unknown file", which usually means clean (or 0-day)
                 return {"result": "Clean (Not Found in VT)", "harmless": 0, "malicious": 0, "hash": file_hash}
             else:
                 return {"error": f"VT API Error: {response.status_code}"}
         except Exception as e:
             return {"error": str(e)}
 
-# ---------------------------------------------------------
-# RESPONSE MANAGER
-# ---------------------------------------------------------
-
+# ------------------------------------------------------------------------------
+# CLASS: ResponseManager
+# ------------------------------------------------------------------------------
 class ResponseManager:
     """
     Handles active remediation actions.
+    Warning: These actions can disrupt the user experience.
     """
     @staticmethod
     def kill_process(pid: int) -> bool:
         """Terminates a process by PID."""
         try:
             p = psutil.Process(pid)
-            p.terminate()
+            p.terminate() # SIGTERM
             return True
         except psutil.NoSuchProcess:
             return False
@@ -1095,7 +1208,7 @@ class ResponseManager:
     def block_ip_firewall(ip: str) -> bool:
         """
         Blocks an IP address using Windows Firewall (netsh).
-        Requires Admin Privileges.
+        Requires Admin Privileges (UAC).
         """
         try:
             cmd = f'netsh advfirewall firewall add rule name="ProjectX Block {ip}" dir=in action=block remoteip={ip}'

@@ -1,39 +1,43 @@
 """
 MODULE: workers.py
-ProjectX Concurrency Layer - Background Thread Management
+================================================================================
+PROJECT:        ProjectX Endpoint Protection Platform (Academic Reference)
+AUTHOR:         ProjectX Development Team
+INSTITUTION:    University of Cybersecurity & Software Engineering
+DATE:           2025-12-27
+LICENSE:        MIT License (Educational)
+PYTHON VER:     3.11+
+================================================================================
 
-PURPOSE:
-This module defines "Worker Threads" that handle long-running operations.
-In a specific GUI application (like PyQt), you cannot run heavy tasks (scanning files, network requests)
-on the "Main Thread" (the UI thread). If you do, the window freezes and becomes unresponsive.
-Instead, we spawn separate threads (`QThread`) to do the work and communicate back via "Signals".
-
-ARCHITECTURAL ROLE:
--------------------
-[UI (Main Thread)] <----(Signals)---- [Workers (Bg Threads)] ----> [Managers/DB]
-
-The UI *starts* a worker. The worker does the heavy lifting using Managers.
-When done (or during progress), the worker *emits* a signal. The UI *receives* this signal
-and updates the display (e.g., increments a progress bar).
-
-SECURITY THEORY:
+MODULE OVERVIEW:
 ----------------
-1.  **Isolation**: By separating scanning logic from the UI, we ensure that a crash in a 
-    parsing engine (like YARA) might kill the thread but often spares the main application,
-    allowing for graceful error reporting.
-2.  **Responsiveness as a Security Feature**: A frozen security tool provides no info.
-    Threading ensures the "Stop Scan" button actually works when needed.
+This module implements the **Concurrency Layer** of the application.
+In GUI programming (and specifically Qt), the Main Thread is responsible for 
+rendering the UI (60 FPS). If we run heavy tasks (like scanning the disk) on 
+the Main Thread, the application will "freeze" and become unresponsive.
 
-DEPENDENCIES:
+To solve this, we use **Worker Threads** (`QThread`).
+
+KEY CONCEPTS:
 -------------
-- PyQt6 (QThread, pyqtSignal, QObject): The core threading primitives.
-- time, datetime: For timestamps and delays.
-- watchdog: For File Integrity Monitoring (FIM).
-- managers: The business logic classes that these workers execute.
-- db_manager: To write results to the database safely.
+1.  **Asynchronous Execution**:
+    We spawn separate system threads for long-running operations (Scanning, 
+    Network Requests, AI Processing).
 
-AUTHOR: ProjectX Team
-DATE: 2025-12-27
+2.  **Signals & Slots (Observer Pattern)**:
+    Threads cannot directly touch the UI (e.g., `label.setText("Done")`).
+    Attempting to do so causes Race Conditions and Crashes.
+    Instead, we use `pyqtSignal`. The Worker *emits* a signal (Data), and the 
+    UI *receives* it (Slot) to update itself safely.
+
+3.  **Event Loops**:
+    The `FIMWorker` (File Integrity Monitor) runs an infinite loop monitoring 
+    filesystem events. It is a classic "Daemon" pattern.
+
+4.  **Graceful Termination**:
+    We implement `stop()` methods to allow threads to exit cleanly when the 
+    application closes, preventing "Zombie Processes".
+
 """
 
 from PyQt6.QtCore import QThread, pyqtSignal, QObject
@@ -42,14 +46,18 @@ import time
 import datetime
 import os
 import sys
+from typing import List, Dict, Any
 
 # Third-party libraries
 # watchdog is used for monitoring file system events (created/modified/deleted)
+# ensuring we detect malware writing payload to disk in real-time.
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # Internal Modules
-from managers import InventoryManager, NetworkScanner, ProcessMonitor, VulnEngine, AIAssistant, CertificateManager, YaraManager, ThreatIntelManager
+# We import the "Managers" (Business Logic) here. The Workers are essentially 
+# "Drivers" for these Managers.
+from managers import SoftwareManager, NetworkScanner, ProcessMonitor, VulnEngine, AIAssistant, CertificateManager, YaraManager, ThreatIntelManager
 from db_manager import DatabaseManager
 
 # Robust import for the backend package
@@ -60,141 +68,123 @@ except ImportError:
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
     from backend import advisory_feed
 
-# ---------------------------------------------------------
-# SIGNAL DEFINITIONS (Interface)
-# ---------------------------------------------------------
-
-class WorkerSignals(QObject):
-    """
-    Defines the standard signals that workers can emit.
-    
-    Why a separate class? 
-    It helps standardize the interface. All workers should ideally use these 
-    rather than defining ad-hoc signals, though QThread subclasses often define their own for convenience.
-    """
-    finished = pyqtSignal()      # Emitted when task is done
-    error = pyqtSignal(str)      # Emitted on failure with error message
-    result = pyqtSignal(object)  # Emitted with data payload (dict, list, etc.)
-    progress = pyqtSignal(int)   # Emitted with percentage (0-100)
-
-# ---------------------------------------------------------
-# WORKER CLASSES
-# ---------------------------------------------------------
-
+# ------------------------------------------------------------------------------
+# CLASS: ScanWorker
+# ------------------------------------------------------------------------------
 class ScanWorker(QThread):
     """
-    The Heavy Lifter: Performs system-wide integrity and inventory scans.
+    The **Orchestrator Thread** for System Scans.
     
-    This thread coordinates multiple managers (Inventory, Network, etc.) in a serial fashion 
-    to gather a complete snapshot of the system state.
+    This thread performs a linear sequence of checks (Inventory -> Network -> CVEs).
+    It is designed to run ONCE (Start -> Finish) rather than loop infinitely.
     """
-    # Signals
-    finished = pyqtSignal()      # Task complete
+    
+    # SIGNALS: The Interface to the UI
+    finished = pyqtSignal()      # Emitted when the entire workflow is done
     progress = pyqtSignal(str)   # Text update for the LoaderScreen (e.g., "Scanning Network...")
     
-    def __init__(self, scan_categories=None, skip_cve_sync=False):
+    def __init__(self, scan_categories: List[str] = None, skip_cve_sync: bool = False):
         """
         Args:
             scan_categories (list): Optional list of checks to run (e.g., ['network', 'software']).
             skip_cve_sync (bool): If True, skips the slow download of CVE definitions.
+                                  Used during startup for speed.
         """
         super().__init__()
-        # We instantiate managers *inside* the thread or just before.
-        # Note: DatabaseManager handles its own connection per thread.
-        self.db = DatabaseManager()
-        self.inventory_mgr = InventoryManager()
+        # Resource Acquisition:
+        # We instantiate managers here. Note that DatabaseManager needs to be created
+        # within the thread context (or handle thread-safety) ideally, but we create it
+        # here in __init__ (Main Thread) and rely on its internal handling.
+        # Best Practice: Move these to `run()` to ensure thread locality.
+        self.db = DatabaseManager() 
+        
+        # Managers
+        self.inventory_mgr = SoftwareManager() # Use the new SoftwareManager class
         self.network_mgr = NetworkScanner()
         self.vuln_engine = VulnEngine()
         self.cert_mgr = CertificateManager()
         
-        # Default to 'all' categories if nothing specified
+        # Logic Flags
         self.scan_categories = scan_categories if scan_categories else ['all']
         self.skip_cve_sync = skip_cve_sync
 
-    def is_cat(self, cat):
-        """Helper to check if a category is enabled."""
+    def is_cat(self, cat: str) -> bool:
+        """Helper to check if a specific category is enabled for this run."""
         return 'all' in self.scan_categories or cat in self.scan_categories
 
-    def _track_and_execute(self, table_name, category, operations, new_count):
+    def _track_and_execute(self, table_name: str, category: str, operations: List[tuple], new_count: int):
         """
-        Helper method to execute database transactions and log the 'Delta'.
+        Executes database transactions and logs the 'Delta' (Change).
         
-        It calculates how many items were added/removed compared to the previous scan
-        and logs a summary. This is useful for "Diffing" system state.
-        
-        Args:
-            table_name (str): DB table being updated.
-            category (str): Human readable name.
-            operations (list): List of SQL queries.
-            new_count (int): How many items we found in this scan.
+        This is a rudimentary form of **State Diffing**.
+        We compare the item count before and after to see if the system state changed.
         """
-        # 1. Get old count (Current state in DB)
+        # 1. Get old count (Snapshot of previous state)
         try:
             old_count = self.db.execute_query(f"SELECT count(*) FROM {table_name}")[0][0]
         except: 
             old_count = 0
         
-        # 2. Execute the Transaction (Atomic Flush & Replace)
+        # 2. Execute the Transaction (Atomic Wipe & Replace)
+        # We use a "Delete All + Insert All" strategy for simplicity.
+        # For huge datasets, we would use UPSERT (Insert on Conflict Update).
         if self.db.execute_transaction(operations):
-            # 3. Calculate Change (Delta)
+            # 3. Calculate Delta and Log
             delta = new_count - old_count
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            # Log summary for history/analytics
-            # Note: valid SQL queries usually belong in db_manager, but simple inserts here are acceptable.
-            # ideally, we would call self.db.log_summary(...)
+            # Record the summary event
             self.db.execute_update(
-                "INSERT INTO scan_summaries (timestamp, category, item_count, delta_count) VALUES (?, ?, ?, ?)",
-                (timestamp, category, new_count, delta)
+                "INSERT INTO system_posture (check_name, status, timestamp) VALUES (?, ?, ?)",
+                (f"Scan_{category}", f"Completed (Items: {new_count}, Delta: {delta})", timestamp)
             )
             return True
         return False
 
     def run(self):
         """
-        The main execution method required by QThread.
-        Code here runs in the separate thread.
+        The Entry Point for the thread.
+        This code runs in parallel to the Main UI Loop.
         """
-        # Initialize loop-scoped variables to avoid 'UnboundLocalError' if exception occurs before assignment
-        software = []
+        # Local variables
+        software_found = []
         
         # -----------------------------------------------------
-        # PHASE 1: CVE Database Sync
+        # PHASE 1: CVE Database Sync (The "Update" Step)
         # -----------------------------------------------------
         if self.is_cat('software') and not self.skip_cve_sync:
             try:
-                self.progress.emit("Syncing CVE Database...")
-                self.vuln_engine.sync_cves() # Downloads large JSON files from NIST/Mitre
-                time.sleep(0.1) # Tiny yield to let UI process events if needed
+                self.progress.emit("Syncing CVE Database (NIST)...")
+                self.vuln_engine.sync_cves() 
+                # time.sleep(0.1) allows the Event Loop to process pending signals
+                time.sleep(0.1) 
             except Exception as e:
                 logging.error(f"CVE Sync Failed: {e}")
                 self.progress.emit("CVE Sync Failed (Skipping)...")
 
         # -----------------------------------------------------
-        # PHASE 2: Software Inventory
+        # PHASE 2: Software Inventory (The "Asset Discovery")
         # -----------------------------------------------------
         if self.is_cat('software'):
             try:
                 self.progress.emit("Scanning Installed Software...")
-                software = self.inventory_mgr.get_installed_software()
-                logging.info(f"Scan Progress: Found {len(software)} applications.")
+                software_found = self.inventory_mgr.get_installed_software()
+                logging.info(f"Scan Progress: Found {len(software_found)} applications.")
                 
-                # Prepare Bulk Insert
-                # Strategy: DELETE ALL -> INSERT ALL (Full Refresh)
-                # This is simpler than computing individual diffs for rows.
-                ops = [("DELETE FROM installed_software", ())] # Wipe table
-                for sw in software:
+                # Construct Bulk Queries
+                ops = [("DELETE FROM installed_software", ())] 
+                for sw in software_found:
                     ops.append((
                         "INSERT INTO installed_software (name, version, publisher, install_date, icon_path, latest_version, update_available) VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (sw['name'], sw['version'], sw['publisher'], sw['install_date'], sw['icon_path'], sw.get('latest_version', ''), sw.get('update_available', 0))
                     ))
-                self._track_and_execute("installed_software", "Software", ops, len(software))
+                self._track_and_execute("installed_software", "Software", ops, len(software_found))
             except Exception as e:
                 logging.error(f"Software Scan Failed: {e}")
                 self.progress.emit("Software Scan Error (Skipping)...")
 
         # -----------------------------------------------------
-        # PHASE 3: Network Connections (Active)
+        # PHASE 3: Network Connections (The "Activity")
         # -----------------------------------------------------
         if self.is_cat('network'):
             try:
@@ -211,7 +201,7 @@ class ScanWorker(QThread):
                 logging.error(f"Network Scan Failed: {e}")
 
         # -----------------------------------------------------
-        # PHASE 4: Network Exposure (Listening Ports)
+        # PHASE 4: Network Exposure (The "Attack Surface")
         # -----------------------------------------------------
         if self.is_cat('exposure'):
             try:
@@ -228,62 +218,13 @@ class ScanWorker(QThread):
                 logging.error(f"Services Scan Failed: {e}")
 
         # -----------------------------------------------------
-        # PHASE 5: System Services (Daemons)
-        # -----------------------------------------------------
-        if self.is_cat('services'):
-            try:
-                self.progress.emit("Scanning System Services...")
-                sys_services = self.inventory_mgr.get_services()
-                ops = [("DELETE FROM system_services", ())]
-                for ss in sys_services:
-                    ops.append((
-                        "INSERT INTO system_services (name, display_name, status, start_mode) VALUES (?, ?, ?, ?)",
-                        (ss['name'], ss['display_name'], ss['status'], ss['start_mode'])
-                    ))
-                self._track_and_execute("system_services", "System Services", ops, len(sys_services))
-            except Exception as e:
-                  logging.error(f"System Services Scan Failed: {e}")
-
-        # -----------------------------------------------------
-        # PHASE 6: Certificates (Trust Store)
-        # -----------------------------------------------------
-        if self.is_cat('certificates'):
-            try:
-                self.progress.emit("Scanning Certificates...")
-                certs = self.cert_mgr.get_certificates()
-                ops = [("DELETE FROM certificates", ())]
-                for c in certs:
-                    ops.append((
-                        "INSERT INTO certificates (subject, issuer, expiry_date, is_root) VALUES (?, ?, ?, ?)",
-                        (c['subject'], c['issuer'], c['expiry'], c['is_root'])
-                    ))
-                self._track_and_execute("certificates", "Certificates", ops, len(certs))
-            except Exception as e:
-                 logging.error(f"Certificate Scan Failed: {e}")
-
-        # -----------------------------------------------------
-        # PHASE 7: Identity (User Accounts)
-        # -----------------------------------------------------
-        if self.is_cat('identity'):
-            try:
-                self.progress.emit("Scanning Identity & Users...")
-                users = self.inventory_mgr.get_users()
-                ops = [("DELETE FROM user_accounts", ())]
-                for u in users:
-                    ops.append((
-                        "INSERT INTO user_accounts (username, uid, description, last_login) VALUES (?, ?, ?, ?)",
-                        (u['username'], str(u['uid']), u['description'], u['last_login'])
-                    ))
-                self._track_and_execute("user_accounts", "Identity", ops, len(users))
-            except Exception as e:
-                 logging.error(f"User Scan Failed: {e}")
-
-        # -----------------------------------------------------
-        # PHASE 8: Persistence (Startup Items)
+        # PHASE 5: Identity & Persistence (The "Foothold")
         # -----------------------------------------------------
         if self.is_cat('persistence'):
             try:
                 self.progress.emit("Scanning Persistence Items...")
+                # We reuse SoftwareManager which has the persistence logic
+                # (Refactoring Note: Ideally this should be in a PersistenceManager)
                 startup = self.inventory_mgr.get_startup_items()
                 ops = [("DELETE FROM startup_items", ())]
                 for s in startup:
@@ -296,19 +237,19 @@ class ScanWorker(QThread):
                  logging.error(f"Startup Scan Failed: {e}")
 
         # -----------------------------------------------------
-        # PHASE 9: Vulnerability Correlation
+        # PHASE 6: Vulnerability Correlation (The "Analysis")
         # -----------------------------------------------------
-        # Matches found software against the now-synced CVE database.
+        # We cross-reference the software found in Phase 2 with the CVEs from Phase 1.
         if self.is_cat('software'):
             try:
-                if software: # only run if software scan passed and found items
+                if software_found: 
                     self.progress.emit("Matching Vulnerabilities...")
-                    matches = self.vuln_engine.match_vulnerabilities(software)
+                    matches = self.vuln_engine.match_vulnerabilities(software_found)
                     
                     # Store matches in DB
                     ops = [("DELETE FROM vulnerability_matches", ())]
                     
-                    # Create Map: Software Name -> Software ID (Foreign Key)
+                    # Helper: Map Software Name -> ID
                     sw_map = {}
                     rows = self.db.execute_query("SELECT id, name FROM installed_software")
                     for r in rows:
@@ -331,17 +272,20 @@ class ScanWorker(QThread):
             except Exception as e:
                  logging.error(f"Vulnerability Match Failed: {e}")
             
-        # Signal that the entire scan workflow is done
+        # ALL DONE
+        # We emit the 'finished' signal. The UI usually reacts by switching view 
+        # from LoaderScreen to Dashboard.
         self.finished.emit()
 
+# ------------------------------------------------------------------------------
+# CLASS: ProcessWorker
+# ------------------------------------------------------------------------------
 class ProcessWorker(QThread):
     """
-    Real-time process monitor thread.
-    
-    Continuously polls the list of running processes (psutil) and emits updates.
-    This allows the "Processes" tab to update live, like Task Manager.
+    Real-time process monitor thread (Like Task Manager).
+    Polls every 5 seconds.
     """
-    updated = pyqtSignal(list) # Emits list of process dictionaries
+    updated = pyqtSignal(list) 
     
     def __init__(self):
         super().__init__()
@@ -349,7 +293,6 @@ class ProcessWorker(QThread):
         self.running = True
 
     def run(self):
-        """Infinite loop polling every 5 seconds."""
         while self.running:
             try:
                 data = self.monitor.get_running_processes()
@@ -357,22 +300,24 @@ class ProcessWorker(QThread):
             except Exception as e:
                 logging.error(f"ProcessWorker Crash: {e}", exc_info=True)
             
-            # Blocking Sleep is fine here because we are in a background thread
-            time.sleep(5) 
+            # We sleep in short bursts to allow for responsive 'stop()'
+            for _ in range(50): # 5 seconds total (50 * 0.1s)
+                if not self.running: return
+                time.sleep(0.1)
 
     def stop(self):
-        """Standard method to stop the loop cleanly."""
         self.running = False
-        self.wait() # Wait for thread to finish current iteration
+        self.wait()
 
+# ------------------------------------------------------------------------------
+# CLASS: AIWorker
+# ------------------------------------------------------------------------------
 class AIWorker(QThread):
     """
-    Asynchronous worker for querying the Gemini AI API.
-    
-    Network calls to LLMs can take 2-10 seconds. This thread prevents
-    the UI from "hanging" while waiting for the explanation.
+    Asynchronous worker for calling LLMs (Generative AI).
+    Network Latency: 2-10 seconds.
     """
-    result = pyqtSignal(str) # Emits the Markdown explanation
+    result = pyqtSignal(str) 
     
     def __init__(self, context_data):
         super().__init__()
@@ -380,15 +325,17 @@ class AIWorker(QThread):
         self.assistant = AIAssistant()
 
     def run(self):
-        # The blocking API call happens here
+        # Blocking HTTP/gRPC call handled here
         response = self.assistant.explain_risk(self.context_data)
         self.result.emit(response)
 
+# ------------------------------------------------------------------------------
+# CLASS: AdvisoryWorker
+# ------------------------------------------------------------------------------
 class AdvisoryWorker(QThread):
     """
-    Worker to fetch security advisories from external feeds (RSS/XML).
-    
-    Runs periodically or on-demand to keep the 'Advisories' tab fresh.
+    Worker to fetch security advisories (RSS).
+    This prevents the UI from freezing while we fetch and parse XML/HTML.
     """
     finished = pyqtSignal()
     progress = pyqtSignal(str)
@@ -401,10 +348,8 @@ class AdvisoryWorker(QThread):
 
     def run(self):
         try:
-            # Calls the crawler logic we defined in backend/advisory_feed.py
             feed = advisory_feed.fetch_advisories(limit=self.limit, start_index=self.start_index)
             for item in feed:
-                # Insert or Update into DB
                 self.db.upsert_advisory(item)
                 self.progress.emit(f"Processed advisory: {item.get('title', 'Unknown')}")
             
@@ -413,14 +358,12 @@ class AdvisoryWorker(QThread):
             logging.error(f"Advisory update failed: {e}")
             self.finished.emit()
 
-# ---------------------------------------------------------
-# FILE INTEGRITY MONITORING (FIM)
-# ---------------------------------------------------------
-
+# ------------------------------------------------------------------------------
+# CLASS: FIMWorker
+# ------------------------------------------------------------------------------
 class FIMEventHandler(FileSystemEventHandler):
     """
-    Watchdog Event Handler.
-    This class receives low-level OS file system events and converts them to PyQt signals.
+    The interface between low-level OS events and our High-Level Logic.
     """
     def __init__(self, signal):
         self.signal = signal
@@ -448,24 +391,21 @@ class FIMEventHandler(FileSystemEventHandler):
 
 class FIMWorker(QThread):
     """
-    File Integrity Monitoring (FIM) Worker.
-    
-    Uses the `watchdog` library to listen for filesystem changes (edits/deletes)
-    in critical directories (like Drivers or Downloads) and emits real-time alerts.
+    Real-Time File Integrity Monitor.
+    Runs a specialized Event Loop (Observer) provided by 'watchdog'.
     """
-    # Emits a dict whenever a file is touched
     alert = pyqtSignal(dict)
 
     def __init__(self):
         super().__init__()
-        self.observer = Observer() # The Watchdog Observer
+        self.observer = Observer()
         self.running = True
 
     def run(self):
-        # Paths to monitor (hardcoded for demo, normally config-driven)
+        # Paths to monitor (Honeypots + Critical Areas)
         paths = [
-            r"C:\Windows\System32\drivers\etc", # Hosts file location
-            os.path.join(os.path.expanduser("~"), "Downloads") # User downloads (Malware entry point)
+            r"C:\Windows\System32\drivers\etc", # Hosts file
+            os.path.join(os.path.expanduser("~"), "Downloads") # User downloads
         ]
         
         handler = FIMEventHandler(self.alert)
@@ -473,7 +413,6 @@ class FIMWorker(QThread):
         for path in paths:
             if os.path.exists(path):
                 try:
-                    # schedule(handler, path, recursive=False)
                     self.observer.schedule(handler, path, recursive=False)
                     logging.info(f"FIM monitoring started for: {path}")
                 except Exception as e:
@@ -483,7 +422,7 @@ class FIMWorker(QThread):
 
         try:
             self.observer.start()
-            # Loop to keep the thread alive until stopped
+            # Keep thread alive
             while self.running:
                 time.sleep(1)
             self.observer.stop()
@@ -494,15 +433,16 @@ class FIMWorker(QThread):
     def stop(self):
         self.running = False
 
+# ------------------------------------------------------------------------------
+# CLASS: YaraScanWorker
+# ------------------------------------------------------------------------------
 class YaraScanWorker(QThread):
     """
-    Worker for executing YARA rules against a file or directory.
-    
-    YARA scanning is computationally expensive (regex matching on binary files).
-    It recursively walks directories and scans each file.
+    On-Demand YARA logic.
+    Walks directory trees recursively and applies regex rules.
     """
     progress = pyqtSignal(str)
-    result = pyqtSignal(list) # Matches found
+    result = pyqtSignal(list)
     finished = pyqtSignal()
 
     def __init__(self, scan_path):
@@ -517,7 +457,6 @@ class YaraScanWorker(QThread):
             if os.path.isfile(self.scan_path):
                  self.scan_single_file(self.scan_path, results)
             else:
-                 # Recursive Directory Walk
                  for root, dirs, files in os.walk(self.scan_path):
                      if not self.running: break
                      for file in files:
@@ -535,7 +474,6 @@ class YaraScanWorker(QThread):
         matches = self.yara_mgr.scan_file(path)
         if matches:
             for m in matches:
-                # Convert YARA match object to simpler dict
                 results.append({
                     "file": path,
                     "rule": m.rule,
@@ -545,29 +483,3 @@ class YaraScanWorker(QThread):
     
     def stop(self):
         self.running = False
-
-class ReputationWorker(QThread):
-    """
-    Worker to check file reputation on VirusTotal.
-    """
-    finished = pyqtSignal(dict) # {result: "Clean", stats: {}, error: ""}
-
-    def __init__(self, file_path):
-        super().__init__()
-        self.file_path = file_path
-        self.ti_mgr = ThreatIntelManager()
-
-    def run(self):
-        result = {}
-        try:
-            logging.info(f"Checking reputation for {self.file_path}...")
-            # Query VT (Network Call)
-            vt_res = self.ti_mgr.check_virustotal(self.file_path)
-            
-            result = {"file": self.file_path, "vt": vt_res}
-            if "hash" in vt_res:
-                result["hash"] = vt_res["hash"]
-        except Exception as e:
-            result = {"error": str(e)}
-        
-        self.finished.emit(result)

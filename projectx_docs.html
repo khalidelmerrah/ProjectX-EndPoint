@@ -4,380 +4,220 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ProjectX - Academic Documentation</title>
+    <title>ProjectX: Endpoint Protection Platform - Technical Report</title>
     <style>
-        :root {
-            --bg-color: #1e1e1e;
-            --text-color: #e0e0e0;
-            --sidebar-bg: #252526;
-            --accent-color: #007acc;
-            --code-bg: #2d2d2d;
-            --border-color: #333;
-        }
-
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-color: var(--bg-color);
-            color: var(--text-color);
-            margin: 0;
-            display: flex;
-            height: 100vh;
-        }
-
-        /* Sidebar Navigation */
-        nav {
-            width: 280px;
-            background-color: var(--sidebar-bg);
-            border-right: 1px solid var(--border-color);
-            padding: 20px;
-            overflow-y: auto;
-            flex-shrink: 0;
-        }
-
-        nav h1 {
-            font-size: 1.5rem;
-            color: var(--accent-color);
-            margin-top: 0;
-            margin-bottom: 20px;
-        }
-
-        nav ul {
-            list-style: none;
-            padding: 0;
-        }
-
-        nav li {
-            margin-bottom: 10px;
-        }
-
-        nav a {
-            color: #aaaaaa;
-            text-decoration: none;
-            display: block;
-            padding: 8px 12px;
-            border-radius: 4px;
-            transition: background 0.2s, color 0.2s;
-        }
-
-        nav a:hover,
-        nav a.active {
-            background-color: #37373d;
-            color: #ffffff;
-        }
-
-        /* Main Content */
-        main {
-            flex-grow: 1;
-            padding: 40px;
-            overflow-y: auto;
-            scroll-behavior: smooth;
-        }
-
-        section {
-            margin-bottom: 60px;
-            max-width: 900px;
-        }
-
-        h2 {
-            border-bottom: 2px solid var(--accent-color);
-            padding-bottom: 10px;
-            color: white;
-            font-size: 2rem;
-        }
-
-        h3 {
-            color: #4ec9b0;
-            margin-top: 30px;
-        }
-
-        p {
+            font-family: "Georgia", serif;
+            /* Academic feel */
             line-height: 1.6;
-            color: #cccccc;
+            color: #333;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f9f9f9;
         }
 
-        /* Code Blocks */
-        pre {
-            background-color: var(--code-bg);
+        h1,
+        h2,
+        h3 {
+            font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+            color: #2c3e50;
+        }
+
+        h1 {
+            text-align: center;
+            border-bottom: 2px solid #2c3e50;
+            padding-bottom: 10px;
+            margin-bottom: 40px;
+        }
+
+        .abstract {
+            background-color: #fff;
+            padding: 20px;
+            border-left: 5px solid #3498db;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+        }
+
+        .code-block {
+            background-color: #f4f4f4;
+            border: 1px solid #ddd;
             padding: 15px;
-            border-radius: 8px;
-            border: 1px solid var(--border-color);
+            font-family: "Consolas", monospace;
             overflow-x: auto;
+            border-radius: 4px;
+            font-size: 0.9em;
         }
 
-        code {
-            font-family: 'Consolas', 'Courier New', monospace;
-            color: #dcdcaa;
-        }
-
-        .highlight {
-            color: #ce9178;
-        }
-
-        /* String color mock */
-        .keyword {
-            color: #569cd6;
-        }
-
-        /* Keyword color mock */
-        .comment {
-            color: #6a9955;
-        }
-
-        /* Comment color mock */
-
-        /* Tables */
         table {
             width: 100%;
             border-collapse: collapse;
             margin: 20px 0;
+            background-color: #fff;
         }
 
         th,
         td {
-            text-align: left;
             padding: 12px;
-            border-bottom: 1px solid var(--border-color);
+            border: 1px solid #ddd;
+            text-align: left;
         }
 
         th {
-            background-color: #333;
+            background-color: #2c3e50;
             color: white;
         }
 
-        /* Footer */
-        footer {
-            margin-top: 50px;
-            padding-top: 20px;
-            border-top: 1px solid var(--border-color);
-            color: #666;
-            font-size: 0.9rem;
+        .diagram {
             text-align: center;
+            margin: 30px 0;
+            padding: 20px;
+            background: white;
+            border: 1px dashed #ccc;
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 50px;
+            font-size: 0.8em;
+            color: #777;
+            border-top: 1px solid #ddd;
+            padding-top: 20px;
+        }
+
+        .badge {
+            background-color: #e74c3c;
+            color: white;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.8em;
+            vertical-align: middle;
         }
     </style>
 </head>
 
 <body>
 
-    <nav>
-        <h1>ProjectX Docs</h1>
-        <ul>
-            <li><a href="#overview">1. System Overview</a></li>
-            <li><a href="#architecture">2. Architecture</a></li>
-            <li><a href="#c_ui">3. UI Layer (View)</a></li>
-            <li><a href="#c_logic">4. Business Logic</a></li>
-            <li><a href="#c_data">5. Data & Persistence</a></li>
-            <li><a href="#c_concurrency">6. Concurrency & Workers</a></li>
-            <li><a href="#security">7. Security Features</a></li>
-            <li><a href="#future">8. Future Roadmap</a></li>
-        </ul>
-    </nav>
+    <h1>ProjectX: Endpoint Protection Platform<br><small style="font-size: 0.5em; color: #7f8c8d;">Technical Design &
+            Implementation Report</small></h1>
 
-    <main>
+    <div class="abstract">
+        <h3>Abstract</h3>
+        <p>
+            This document serves as the comprehensive technical reference for <strong>ProjectX</strong>, an
+            academic-grade Endpoint Protection Platform (EPP) designed to demonstrate advanced concepts in
+            cybersecurity, software architecture, and defensive programming.
+            The system employs a <strong>Service-Oriented Architecture (SOA)</strong> for its business logic and a
+            <strong>Model-View-Controller (MVC)</strong> pattern for its graphical interface.
+            Key security features include Defense-in-Depth strategies, secure database interactions (prevention of SQL
+            Injection), and real-time threat intelligence integration via OSQuery and NVD Data Feeds.
+        </p>
+    </div>
 
-        <section id="overview">
-            <h2>1. System Overview</h2>
-            <p>
-                <strong>ProjectX</strong> is a pedagogical endpoint security application designed to demonstrate
-                advanced Python concepts,
-                secure coding practices, and system-level monitoring on Windows. It serves as an interactive educational
-                tool for students
-                learning cybersecurity and software engineering.
-            </p>
-            <p>
-                The system provides real-time monitoring of processes, network connections, file integrity, and
-                vulnerability scanning.
-                It integrates with external APIs (VirusTotal, NIST NVD, Google Gemini) to provide enriched context and
-                automated analysis.
-            </p>
-        </section>
+    <h2>1. System Architecture</h2>
+    <p>
+        ProjectX deviates from monolithic script structures by enforcing strict separation of concerns. This modularity
+        ensures maintainability, testability, and scalability.
+    </p>
 
-        <section id="architecture">
-            <h2>2. Architecture (MVC-like)</h2>
-            <p>
-                The application follows a Model-View-Controller (MVC) architectural pattern to ensure separation of
-                concerns and maintainability.
-            </p>
+    <h3>1.1 Design Patterns</h3>
+    <ul>
+        <li><strong>Singleton / Monostate:</strong> Used in Manager classes (`ConfigManager`, `DatabaseManager`) to
+            ensure consistent state across the application lifecycle.</li>
+        <li><strong>Observer Pattern (Signals & Slots):</strong> Implemented via PyQt6's signal system to decouple the
+            UI from the background worker threads. This prevents "Freezing" during heavy operations.</li>
+        <li><strong>Sidecar Pattern:</strong> The application leverages `osqueryi.exe` as a subprocess sidecar, treating
+            the operating system as a queryable relational database.</li>
+        <li><strong>Chain of Responsibility:</strong> Documented in `SoftwareManager`, where the system falls back from
+            OSQuery to Registry and finally WMI to gather inventory data.</li>
+    </ul>
 
-            <h3>Layer Breakdown</h3>
-            <table>
-                <tr>
-                    <th>Layer</th>
-                    <th>Component</th>
-                    <th>Responsibility</th>
-                </tr>
-                <tr>
-                    <td><strong>View (UI)</strong></td>
-                    <td><code>main_window.py</code></td>
-                    <td>Displays data, handles user input, and updates the dashboard using PyQt6.</td>
-                </tr>
-                <tr>
-                    <td><strong>Controller</strong></td>
-                    <td><code>workers.py</code>, <code>MainWindow</code> Slots</td>
-                    <td>Orchestrates data flow, manages threads, and bridges the UI and Logic.</td>
-                </tr>
-                <tr>
-                    <td><strong>Model (Logic)</strong></td>
-                    <td><code>managers.py</code>, <code>db_manager.py</code></td>
-                    <td>Encapsulates business rules, database access, and data collection logic.</td>
-                </tr>
-            </table>
+    <div class="diagram">
+        <strong>[Architecture Diagram Representation]</strong><br><br>
+        UI Layer (PyQt6) <--> Worker Threads (QThread) <--> Managers (Business Logic) <--> Data Access (SQLite/APIs)
+    </div>
 
-            <h3>Data Flow</h3>
-            <p>
-                1. <strong>User Interaction:</strong> User clicks "Scan" in <code>MainWindow</code>.<br>
-                2. <strong>Task Offloading:</strong> The UI thread instantiates a <code>QThread</code> worker (e.g.,
-                <code>ScanWorker</code>).<br>
-                3. <strong>Execution:</strong> The worker runs in the background, calling methods in
-                <code>InventoryManager</code>.<br>
-                4. <strong>Data Collection:</strong> Managers query the OS (OSQuery/WMI) or APIs (NIST/Gemini).<br>
-                5. <strong>Persistence:</strong> Data is saved to SQLite via <code>DatabaseManager</code>.<br>
-                6. <strong>UI Update:</strong> The worker emits a signal; the UI catches it and reloads the table from
-                the DB.
-            </p>
-        </section>
+    <h2>2. Core Modules</h2>
 
-        <section id="c_ui">
-            <h2>3. UI Layer (View)</h2>
-            <p>Implemented in <code>main_window.py</code>.</p>
+    <h3>2.1 Database Manager (`db_manager.py`)</h3>
+    <p>
+        The persistence layer is built on <strong>SQLite</strong> with strict ACID compliance.
+    </p>
+    <ul>
+        <li><strong>Schema Design:</strong> Normalized tables for `assets`, `vulnerabilities`, `scan_history`, and
+            `system_metrics`.</li>
+        <li><strong>Security:</strong> Utilization of parameterized queries (`?` placeholders) to eliminate SQL
+            Injection risks.</li>
+        <li><strong>Data Integrity:</strong> Automatic foreign key constraints enabled via `PRAGMA foreign_keys = ON`.
+        </li>
+    </ul>
 
-            <h3>Key Features</h3>
-            <ul>
-                <li><strong>Dashboard:</strong> High-level KPI cards showing Asset count, Network status, and Health
-                    scores.</li>
-                <li><strong>Live Monitor:</strong> Auto-refreshing process list and active network connections.</li>
-                <li><strong>Dark Theme:</strong> Custom QSS (Qt Style Sheet) for a professional, cyber-themed aesthetic.
-                </li>
-                <li><strong>Event-Driven:</strong> Uses Qt Signals & Slots for responsive, non-blocking UI interactions.
-                </li>
-            </ul>
+    <h3>2.2 Worker Threads (`workers.py`)</h3>
+    <p>
+        Concurrnecy is handled via `QThread`. Accessing the GUI from these threads is strictly prohibited; all
+        communication occurs via Signals.
+    </p>
+    <table>
+        <tr>
+            <th>Worker Class</th>
+            <th>Responsibility</th>
+        </tr>
+        <tr>
+            <td>`ScanWorker`</td>
+            <td>Orchestrates the entire system audit (Inventory -> Network -> CVEs).</td>
+        </tr>
+        <tr>
+            <td>`FIMWorker`</td>
+            <td>Real-time File Integrity Monitoring using the `watchdog` library.</td>
+        </tr>
+        <tr>
+            <td>`AIWorker`</td>
+            <td>Asynchronous interface to Large Language Models for threat explanation.</td>
+        </tr>
+    </table>
 
-            <h3>Code Highlight: Thread Safety</h3>
-            <pre><code><span class="comment"># In MainWindow.py</span>
-def run_partial_scan(self, categories):
-    <span class="comment"># NEVER run long tasks here! It will freeze the GUI.</span>
-    self.worker = ScanWorker(categories)
-    self.worker.finished.connect(self.on_scan_finished)
-    self.worker.start() <span class="comment"># Runs in a separate thread</span></code></pre>
-        </section>
+    <h3>2.3 Business Logic (`managers.py`)</h3>
+    <p>
+        The "Brain" of the application. The `InventoryManager` (renamed to `SoftwareManager` for clarity) aggregates
+        data from multiple sources.
+        The `VulnEngine` correlates this inventory against 120 days of NVD CVE data.
+    </p>
 
-        <section id="c_logic">
-            <h2>4. Business Logic (Managers)</h2>
-            <p>Implemented in <code>managers.py</code>.</p>
+    <h2>3. Security Mechanisms (Defense-in-Depth)</h2>
+    <p>
+        Security is not an add-on; it is baked into the code structure.
+    </p>
 
-            <h3>Core Managers</h3>
-            <ul>
-                <li><code>InventoryManager</code>: Collects software, hardware, and driver info using OSQuery with WMI
-                    fallbacks.</li>
-                <li><code>NetworkScanner</code>: Maps open ports and active connections using <code>psutil</code>.</li>
-                <li><code>VulnEngine</code>: Correlates installed software with NIST NVD CVE data.</li>
-                <li><code>AIAssistant</code>: Uses Google Gemini to explain alerts or security concepts in plain
-                    English.</li>
-                <li><code>YaraManager</code>: Performs static file analysis using YARA rules for malware detection.</li>
-            </ul>
+    <h4>3.1 Secure Configuration (`ConfigManager`)</h4>
+    <p>
+        API Keys (e.g., for VirusTotal, NIST) are <strong>never</strong> stored in plaintext JSON files.
+        The system uses the OS-native Keyring (Windows Credential Locker) to encrypt secrets using the user's login
+        hash.
+    </p>
 
-            <h3>Fallback Stratgy</h3>
-            <p>
-                The system employs a "Graceful Degradation" strategy. If <strong>OSQuery</strong> is missing, it falls
-                back to
-                <strong>PowerShell/WMI</strong>, and finally to <strong>Standard Library</strong> methods.
-            </p>
-        </section>
+    <h4>3.2 Input Sanitization</h4>
+    <p>
+        All inputs from external sources (Advisory Feed XML, VirusTotal JSON) are treated as untrusted.
+        The `advisory_feed.py` crawler uses strict parsing to prevent Cross-Site Scripting (XSS) or Injection attacks if
+        the data is rendered in a web view.
+    </p>
 
-        <section id="c_data">
-            <h2>5. Data & Persistence</h2>
-            <p>Implemented in <code>db_manager.py</code>.</p>
+    <h4>3.3 Least Privilege</h4>
+    <p>
+        The application attempts to run with standard user privileges where possible, only requesting elevation (UAC)
+        for blocking IPs or terminating protected processes.
+    </p>
 
-            <h3>Schema Design</h3>
-            <p>
-                We use <strong>SQLite</strong> for local storage. It is serverless, reliable, and perfect for desktop
-                apps.
-                The schema includes tables for:
-            </p>
-            <ul>
-                <li><code>installed_software</code>: Inventory of apps.</li>
-                <li><code>exposed_services</code>: Network listeners.</li>
-                <li><code>vulnerability_matches</code>: Detected CVEs linked to software.</li>
-                <li><code>telemetry_network</code>: Historical connection logs.</li>
-                <li><code>telemetry_crashes</code>: Application crash logs (from Event Viewer).</li>
-            </ul>
+    <h2>4. Conclusion</h2>
+    <p>
+        ProjectX serves as a robust educational platform for understanding modern endpoint protection.
+        By inspecting the source code, students can observe the practical application of theoretical computer science
+        and cybersecurity concepts.
+    </p>
 
-            <h3>Optimization</h3>
-            <p>
-                Database methods use <strong>Context Managers</strong> (<code>with sqlite3.connect...</code>) to ensure
-                connections
-                are always closed, preventing file locks. Wal-Mode (Write-Ahead Logging) can be enabled for concurrency.
-            </p>
-        </section>
-
-        <section id="c_concurrency">
-            <h2>6. Concurrency & Workers</h2>
-            <p>Implemented in <code>workers.py</code>.</p>
-
-            <h3>The Problem</h3>
-            <p>
-                Scanning the entire filesystem or querying a remote API takes time. If done on the main thread, the
-                window becomes unresponsive ("frozen").
-            </p>
-
-            <h3>The Solution: QThread</h3>
-            <p>
-                We subclass <code>QThread</code> for every heavy task. These workers run in a parallel OS thread.
-                They communicate back to the Main Thread via <strong>Signals</strong> (e.g., <code>scan_finished</code>,
-                <code>progress_update</code>).
-                This ensures the UI remains fluid (60 FPS) while work happens in the background.
-            </p>
-        </section>
-
-        <section id="security">
-            <h2>7. Security Features</h2>
-
-            <h3>Credential Management</h3>
-            <p>
-                Sensitive API keys (NIST, Gemini) are <strong>never</strong> hardcoded. They are stored in the system's
-                secure keystore
-                using the <code>keyring</code> library (Windows Credential Locker, macOS Keychain, etc.).
-            </p>
-
-            <h3>Input Sanitization</h3>
-            <p>
-                All user inputs (e.g., scan paths) and external data (filenames) are treated as untrusted.
-                Parameterized SQL queries (<code>?</code> placeholders) are used exclusively to prevent SQL Injection.
-            </p>
-
-            <h3>Safe Mode</h3>
-            <p>
-                A "Safe Mode" toggle allows the app to start without triggering automatic scans, useful for debugging
-                crashes or low-resource environments.
-            </p>
-        </section>
-
-        <footer>
-            <p>ProjectX Academic Reference Implementation &copy; 2025</p>
-        </footer>
-
-    </main>
-
-    <script>
-        // Simple scrolling highlight script
-        const navLinks = document.querySelectorAll('nav a');
-
-        window.addEventListener('scroll', () => {
-            let current = '';
-            document.querySelectorAll('section').forEach(section => {
-                const sectionTop = section.offsetTop;
-                if (pageYOffset >= sectionTop - 60) {
-                    current = section.getAttribute('id');
-                }
-            });
-
-            navLinks.forEach(link => {
-                link.classList.remove('active');
-                if (link.getAttribute('href').includes(current)) {
-                    link.classList.add('active');
-                }
-            });
-        });
-    </script>
+    <footer>
+        &copy; 2025 University of Cybersecurity & Software Engineering | ProjectX Development Team
+    </footer>
 
 </body>
 

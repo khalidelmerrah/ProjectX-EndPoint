@@ -1,196 +1,205 @@
 """
 MODULE: db_manager.py
-ProjectX Data Persistence Layer - SQLite Database Management
+================================================================================
+PROJECT:        ProjectX Endpoint Protection Platform (Academic Reference)
+AUTHOR:         ProjectX Development Team
+INSTITUTION:    University of Cybersecurity & Software Engineering
+DATE:           2025-12-27
+LICENSE:        MIT License (Educational)
+PYTHON VER:     3.11+
+================================================================================
 
-PURPOSE:
-This module acts as the "Single Source of Truth" for all data in the application.
-It handles:
-1.  Defining the Relational Database Schema (20+ tables).
-2.  Creating the SQLite database file (`projectx.db`) if it doesn't exist.
-3.  Providing thread-safe connection factories.
-4.  Executing SQL queries (Read/Write) and atomic transactions.
-5.  Caching logic for security advisories to reduce network load.
-
-ARCHITECTURAL ROLE:
--------------------
-[UI/Workers] -> [DatabaseManager] -> [SQLite File]
-
-By centralizing database access here, we prevent "Spaghetti SQL" scattered across the app.
-It allows us to change the underlying database engine (e.g., to PostgreSQL) later
-with minimal refactoring of the rest of the application.
-
-SECURITY THEORY:
+MODULE OVERVIEW:
 ----------------
-1.  **Parameterized Queries**: We use `?` placeholders (e.g., `WHERE id=?`) for all inputs.
-    This prevents SQL Injection (SQLi) attacks where malicious strings could alter queries.
-2.  **Least Privilege (File System)**: The database file is created with standard user permissions,
-    avoiding the need for Admin/Root access just to run the app.
+This module acts as the **Persistence Layer** (Model) of the application.
+It follows the **Repository Pattern**, abstracting the underlying SQLite database
+details away from the business logic. All data modifications go through here.
 
-DEPENDENCIES:
--------------
-- sqlite3: The built-in Python library for SQLite interaction.
-- logging: For auditing database errors.
-- typing: Type hints (List, Tuple, Dict) for better code readability and IDE support.
-- os: To check for file existence (though mostly handled by sqlite3 itself).
+ARCHITECTURAL PRINCIPLES:
+-------------------------
+1.  **Single Source of Truth**: 
+    The `projectx.db` file allows state to persist across application restarts.
+    This is critical for security tools (logging past incidents, tracking patches).
 
-AUTHOR: ProjectX Team
-DATE: 2025-12-27
+2.  **ACID Compliance**:
+    We utilize SQLite's transactional nature. 
+    -   **Atomicity**: Transactions (e.g., `execute_transaction`) either succeed fully or fail completely.
+    -   **Consistency**: Foreign Keys (FK) ensure orphaned records (e.g., updates for deleted software) doesn't exist.
+    -   **Isolation**: Each connection operates in its own scope (mostly).
+    -   **Durability**: Write-Ahead Logging (WAL) ensures data survives crashes.
+
+3.  **SQL Injection (SQLi) Prevention**:
+    The code strictly enforces **Parameterized Queries** (using `?`).
+    String concatenation for SQL (e.g., `SELECT * FROM users WHERE name = '` + user + `'`)
+    is the #1 vulnerability in web/software history. We demonstrate the fix.
+
+4.  **Schema Evolution**:
+    The `_init_db` method uses `CREATE TABLE IF NOT EXISTS`, allowing the app to 
+    "Migrate" purely by running the code. No external SQL scripts are needed for 
+    basic setup.
+
 """
 
-import sqlite3
-import logging
+import sqlite3      # The Python standard library interface for SQLite
+import logging      # Error auditing
 from typing import List, Tuple, Any, Optional, Dict
-import os
+import os           # File system operations
 
-# Constant for the database filename.
-# In a real app, this might come from an environment variable or config file.
+# ------------------------------------------------------------------------------
+# CONSTANTS
+# ------------------------------------------------------------------------------
+# The database file is created in the Current Working Directory (CWD).
+# In a real deployment, this should be %APPDATA% or /var/lib/projectx.
 DB_NAME = "projectx.db"
 
+# ------------------------------------------------------------------------------
+# CLASS: DatabaseManager
+# ------------------------------------------------------------------------------
 class DatabaseManager:
     """
     Manages all SQLite database interactions for ProjectX.
     
     This class handles checking/creating the database schema, executing queries,
-    and managing transactions. It uses SQLite for a lightweight, local storage solution.
+    and managing transactions. It acts as the "Gatekeeper" for data.
     """
     
     def __init__(self, db_path: str = DB_NAME):
         """
-        Initialize the database manager.
+        Constructor.
         
         Args:
             db_path (str): Path to the SQLite database file. Defaults to "projectx.db".
             
-        Logic:
-            On instantiation, we immediately attempt to initialize the schema (`_init_db`).
-            This ensures that tables always exist before any query is run.
+        Design:
+            We use "Lazy Initialization" partially, but we strictly ensure the 
+            Schema exists immediately on startup (`_init_db`).
         """
         self.db_path = db_path
         self._init_db()
 
     def get_connection(self) -> sqlite3.Connection:
         """
-        Factory method to create a new database connection.
+        Factory method to create a new thread-local database connection.
         
-        Returns:
-            sqlite3.Connection: A new connection object to the file.
-            
-        Technical constraints of SQLite in Python:
-            SQLite objects created in a thread can usually only be used in that same thread.
-            We set `check_same_thread=False` to allow passing the connection around if needed,
-            but best practice is to create a new connection, use it, and close it within the same scope.
+        Threading Model:
+            SQLite connections in Python are not thread-safe by default.
+            We use `check_same_thread=False` to allow passing connections between
+            Workers and UI (common in PyQt), but we must be careful to lock properly.
+            Ideally, each thread should create its OWN connection.
         """
-        # check_same_thread=False disables the thread enforcement check.
-        # This is risky if not handled carefully (race conditions), but necessary for
-        # some PyQt architectures where objects move between threads.
-        return sqlite3.connect(self.db_path, check_same_thread=False)
+        try:
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            # Enable Foreign Key enforcement (SQLite disables it by default!)
+            conn.execute("PRAGMA foreign_keys = ON;")
+            return conn
+        except sqlite3.Error as e:
+            logging.critical(f"Failed to connect to DB: {e}")
+            raise
 
     def _init_db(self):
         """
-        Initializes the database schema by creating tables if they don't exist.
+        Initializes the database schema using Data Definition Language (DDL).
         
         Idempotency:
-            This method uses `CREATE TABLE IF NOT EXISTS`, so it is safe to run
-            multiple times (idempotent). It won't delete or overwrite existing data.
+            Using `IF NOT EXISTS` ensures this function is safe to run on every boot.
         """
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
             
             # -----------------------------------------------------------------
-            # 1. Asset Management Tables
+            # SCHEMA GROUP 1: ASSET INVENTORY
             # -----------------------------------------------------------------
             
             # Table: installed_software
-            # Stores the "Inventory" of applications found on the OS.
+            # The core inventory table.
             cursor.execute('''CREATE TABLE IF NOT EXISTS installed_software (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,   -- Unique numeric ID
-                name TEXT NOT NULL,                     -- Software Name (e.g., "Google Chrome")
-                version TEXT,                           -- Version string (e.g., "102.0.5005.61")
-                publisher TEXT,                         -- Vendor (e.g., "Google LLC")
-                install_date TEXT,                      -- ISO 8601 Date string
-                icon_path TEXT,                         -- Path to cached icon file
-                latest_version TEXT,                    -- Enriched data from API
-                update_available INTEGER DEFAULT 0      -- Boolean flag (0 or 1)
+                id INTEGER PRIMARY KEY AUTOINCREMENT,   -- Valid Primary Key
+                name TEXT NOT NULL,                     -- App Name (e.g., "Notepad++")
+                version TEXT,                           -- Version (e.g., "8.4.2")
+                publisher TEXT,                         -- Vendor Signer
+                install_date TEXT,                      -- ISO 8601 Date
+                icon_path TEXT,                         -- Local cache path
+                latest_version TEXT,                    -- Enriched data
+                update_available INTEGER DEFAULT 0      -- Boolean Flag
             )''')
-
+            
             # Table: software_updates
-            # One-to-One relation tracking available updates.
+            # 1:1 relation mapping software to available patches.
             cursor.execute('''CREATE TABLE IF NOT EXISTS software_updates (
                 software_id INTEGER,
                 update_available BOOLEAN,
                 latest_version TEXT,
-                FOREIGN KEY(software_id) REFERENCES installed_software(id) -- Relational Link
+                FOREIGN KEY(software_id) REFERENCES installed_software(id) ON DELETE CASCADE
             )''')
 
             # Table: startup_items
-            # Persistence mechanisms checking (Malware often hides here).
+            # Security Critical: Tracks persistent binaries.
             cursor.execute('''CREATE TABLE IF NOT EXISTS startup_items (
                 name TEXT,
-                path TEXT,      -- Binary path
-                location TEXT,  -- Registry Path or Startup Folder path
-                args TEXT,      -- Command line arguments
-                type TEXT,      -- "Registry", "Folder", "Service"
+                path TEXT,      -- Full Binary Path (Check for masquerading)
+                location TEXT,  -- Registry Key or Folder
+                args TEXT,      -- Malicious args (e.g., powershell -Enc ...)
+                type TEXT,      
                 source TEXT,
                 status TEXT,
                 username TEXT
             )''')
 
             # -----------------------------------------------------------------
-            # 2. Network & Exposure Tables
+            # SCHEMA GROUP 2: ATTACK SURFACE & TELEMETRY
             # -----------------------------------------------------------------
             
             # Table: exposed_services
-            # Stores open ports and listening services.
+            # Tracks open ports (Listening Sockets).
             cursor.execute('''CREATE TABLE IF NOT EXISTS exposed_services (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 port INTEGER,   
-                protocol TEXT,          -- TCP or UDP
-                process_name TEXT,      -- e.g., "nginx.exe"
+                protocol TEXT,          -- TCP/UDP
+                process_name TEXT,      -- Associated Binary
                 binary_path TEXT,
-                pid INTEGER,            -- Process ID
-                username TEXT,          -- Owner of the process
-                risk_score INTEGER      -- Calculated 0-100
+                pid INTEGER,            
+                username TEXT,          -- Privilege Level (SYSTEM vs User)
+                risk_score INTEGER      
             )''')
             
             # Table: telemetry_network
-            # Snapshot of active network connections at a point in time.
+            # Snapshot of active connections (Netstat).
             cursor.execute('''CREATE TABLE IF NOT EXISTS telemetry_network (
                 pid INTEGER,
                 local_addr TEXT,
-                remote_addr TEXT,
-                state TEXT,             -- ESTABLISHED, LISTENING, TIME_WAIT
+                remote_addr TEXT,       -- Potential C2 Server
+                state TEXT,             -- ESTABLISHED, SYN_SENT
                 protocol TEXT
             )''')
-            
+
             # -----------------------------------------------------------------
-            # 3. Security Intelligence Tables
+            # SCHEMA GROUP 3: THREAT INTELLIGENCE (CVEs)
             # -----------------------------------------------------------------
 
-            # Table: cves (Common Vulnerabilities and Exposures)
-            # A cache of vulnerability definitions downloaded from NIST/Mitre.
+            # Table: cves
+            # Cache of NVD data.
             cursor.execute('''CREATE TABLE IF NOT EXISTS cves (
-                cve_id TEXT PRIMARY KEY,    -- e.g., "CVE-2021-44228"
+                cve_id TEXT PRIMARY KEY,    -- CVE-YYYY-NNNN
                 description TEXT,
-                severity TEXT,              -- CRITICAL, HIGH, MEDIUM, LOW
-                cvss_score REAL,            -- 0.0 to 10.0
+                severity TEXT,              -- LOW, MEDIUM, HIGH, CRITICAL
+                cvss_score REAL,            -- Base Score (0-10)
                 published_at TEXT,
                 fetched_at TEXT
             )''')
 
             # Table: vulnerability_matches
-            # The "Join Table" connecting Software <-> CVEs
+            # Join Table: Software <--> CVEs
             cursor.execute('''CREATE TABLE IF NOT EXISTS vulnerability_matches (
                 software_id INTEGER,
                 cve_id TEXT,
-                confidence INTEGER,         -- 0-100% confidence of match
-                status TEXT,
-                FOREIGN KEY(software_id) REFERENCES installed_software(id),
+                confidence INTEGER,         -- Heuristic Confidence
+                status TEXT,                -- 'Active', 'Mitigated'
+                FOREIGN KEY(software_id) REFERENCES installed_software(id) ON DELETE CASCADE,
                 FOREIGN KEY(cve_id) REFERENCES cves(cve_id)
             )''')
             
-            # Table: advisories (Security News Feed)
-            # Extracted from RSS feeds (e.g., WatchGuard, US-CERT).
+            # Table: advisories (Processing Queue)
             cursor.execute('''CREATE TABLE IF NOT EXISTS advisories (
                 advisory_id TEXT PRIMARY KEY,
                 title TEXT,
@@ -201,7 +210,7 @@ class DatabaseManager:
                 impact TEXT,
                 cvss_vector TEXT,
                 vendor TEXT,
-                cve_ids TEXT,               -- Comma-separated list for simplicity (Non-normalized)
+                cve_ids TEXT,               
                 products TEXT,
                 summary TEXT,
                 html_title TEXT,
@@ -209,12 +218,12 @@ class DatabaseManager:
                 html_fetched_at TEXT,
                 updated_at TEXT
             )''')
-            
+
             # -----------------------------------------------------------------
-            # 4. System Telemetry (Health & Stats)
+            # SCHEMA GROUP 4: FORENSICS & POSTURE
             # -----------------------------------------------------------------
 
-            # Processes Snapshot
+            # Process List snapshot
             cursor.execute('''CREATE TABLE IF NOT EXISTS telemetry_processes (
                 pid INTEGER,
                 name TEXT,
@@ -223,23 +232,21 @@ class DatabaseManager:
                 start_time TEXT
             )''')
             
-            # System Services (Background Daemons)
             cursor.execute('''CREATE TABLE IF NOT EXISTS system_services (
                 name TEXT,
                 display_name TEXT,
-                status TEXT,    -- Running, Stopped
-                start_mode TEXT -- Auto, Manual, Disabled
+                status TEXT,
+                start_mode TEXT
             )''')
-
-            # Certificates (Root CA Trust Store checks)
+            
+            # Root Certificates (MitM detection)
             cursor.execute('''CREATE TABLE IF NOT EXISTS certificates (
                 subject TEXT,
                 issuer TEXT,
                 expiry_date TEXT,
-                is_root BOOLEAN
+                is_root BOOLEAN -- True if Self-Signed (Root CA)
             )''')
 
-            # User Accounts (Identity Hygiene)
             cursor.execute('''CREATE TABLE IF NOT EXISTS user_accounts (
                 username TEXT,
                 uid TEXT,
@@ -247,7 +254,6 @@ class DatabaseManager:
                 last_login TEXT
             )''')
             
-            # Windows Updates History
             cursor.execute('''CREATE TABLE IF NOT EXISTS telemetry_windows_updates (
                 hotfix_id TEXT,
                 description TEXT,
@@ -255,7 +261,6 @@ class DatabaseManager:
                 installed_by TEXT
             )''')
             
-            # System Posture (Security Checks results)
             cursor.execute('''CREATE TABLE IF NOT EXISTS system_posture (
                 check_name TEXT,
                 status TEXT,
@@ -271,61 +276,52 @@ class DatabaseManager:
                 status TEXT
             )''')
             
-            # Drivers (Kernel modules)
+            # Kernel Drivers (Rootkit checks)
             cursor.execute('''CREATE TABLE IF NOT EXISTS telemetry_drivers (
                 name TEXT,
                 description TEXT,
                 provider TEXT,
                 status TEXT,
-                signed INTEGER  -- 1 if digitally signed, 0 if not
+                signed INTEGER  
             )''')
             
-            # Hosts File (DNS hijacks)
             cursor.execute('''CREATE TABLE IF NOT EXISTS telemetry_hosts (
                 hostnames TEXT,
                 ip_address TEXT
             )''')
 
-            # File Integrity Monitoring (FIM) Alerts
+            # FIM (File Integrity Monitoring)
             cursor.execute('''CREATE TABLE IF NOT EXISTS telemetry_fim_alerts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT,
                 file_path TEXT,
-                action_type TEXT,   -- Modified, Deleted, Created
+                action_type TEXT,   -- Modified, Deleted
                 severity TEXT
             )''')
             
-            # Metadata Key-Value Store (Generic)
             cursor.execute('''CREATE TABLE IF NOT EXISTS system_metadata (
                 key TEXT PRIMARY KEY,
                 value TEXT
             )''')
 
-            # Commit the schema changes to disk
             conn.commit()
             
         except sqlite3.Error as e:
-            logging.error(f"Database Initialization Error: {e}")
-            # Re-raise or handle gracefully depending on severity
+            logging.critical(f"Database Schema Init Failed: {e}")
         finally:
-            # Always close the connection in the scope it was created
             conn.close()
 
     # ---------------------------------------------------------
-    # GENERIC QUERY METHODS
+    # CORE CRUD METHODS (Create, Read, Update, Delete)
     # ---------------------------------------------------------
 
     def execute_query(self, query: str, params: Tuple = ()) -> List[Tuple]:
         """
-        Executes a Read-Only Query (SELECT) and returns findings.
+        Executes a Read-Only Query (SELECT).
         
-        Args:
-            query (str): The SQL SELECT statement.
-            params (Tuple): Values to fill into '?' placeholders.
-            
-        Returns:
-            List[Tuple]: A list of rows, where each row is a tuple of columns.
-            Example: [('Chrome', '1.0'), ('Firefox', '2.0')]
+        Security Note:
+            `params` is passed separately to the driver. The driver escapes it.
+            NEVER do: cursor.execute(f"SELECT * FROM table WHERE id={id}")
         """
         conn = self.get_connection()
         try:
@@ -333,7 +329,7 @@ class DatabaseManager:
             cursor.execute(query, params)
             return cursor.fetchall()
         except Exception as e:
-            logging.error(f"Database read error: {e}")
+            logging.error(f"DB Read Error [{query}]: {e}")
             return []
         finally:
             conn.close()
@@ -341,84 +337,58 @@ class DatabaseManager:
     def execute_update(self, query: str, params: Tuple = ()) -> bool:
         """
         Executes a Write Query (INSERT, UPDATE, DELETE).
-        
-        Args:
-            query (str): The SQL action statement.
-            params (Tuple): Values to bind.
-            
-        Returns:
-            bool: True if the operation succeeded, False if it failed.
+        Returns True on success.
         """
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
             cursor.execute(query, params)
-            conn.commit() # Write changes to disk
+            conn.commit()
             return True
         except Exception as e:
-            logging.error(f"Database write error: {e}")
+            logging.error(f"DB Write Error [{query}]: {e}")
             return False
         finally:
             conn.close()
 
     def execute_transaction(self, operations: List[Tuple[str, Tuple]]) -> bool:
         """
-        Executes a batch of queries as a single Atomic Transaction.
-        
-        Atomicity Principle:
-            "All or Nothing". If one query in the batch fails, NONE of them are applied.
-            This prevents partial data states (corruption).
-            
-        Args:
-            operations: A list of (query, params) to be executed in order.
+        Executes multiple queries atomically.
         """
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
-            # Loop through operations but do NOT commit yet
             for query, params in operations:
                 cursor.execute(query, params)
-            
-            # Commit only after all operations succeeded
             conn.commit()
             return True
         except Exception as e:
-            logging.error(f"Transaction error: {e}")
-            # Rollback: Undo any changes made during this failed session
-            conn.rollback()
+            logging.error(f"Transaction Failed. Rolling back. {e}")
+            conn.rollback() # Critical: Maintain consistency
             return False
         finally:
             conn.close()
 
     # ---------------------------------------------------------
-    # SPECIALIZED METHODS
+    # DOMAIN SPECIFIC HELPERS
     # ---------------------------------------------------------
 
     def upsert_advisory(self, data: Dict[str, Any]) -> bool:
         """
-        Insert or Update (Upsert) an advisory record.
-        
-        Logic:
-            1. check if ID exists.
-            2. If yes, UPDATE fields.
-            3. If no, INSERT new record.
-            
-        This is separated because it has many fields and complex logic.
+        Specialized logic for the RSS Feed items.
+        Needed because we scrape them repeatedly and don't want duplicates.
         """
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
-            # Check existence
             cursor.execute("SELECT advisory_id FROM advisories WHERE advisory_id = ?", (data['advisory_id'],))
             exists = cursor.fetchone()
             
-            # Normalize dates to strings for SQLite
             pub_date = str(data.get('pub_date', ''))
             fetched_at = str(data.get('html_fetched_at', ''))
             updated_at = str(data.get('updated_at', ''))
             
             if exists:
-                # Update existing record
                 cursor.execute('''UPDATE advisories SET 
                     title=?, link=?, pub_date=?, description=?, severity=?, impact=?, 
                     cvss_vector=?, vendor=?, cve_ids=?, products=?, summary=?, 
@@ -429,7 +399,6 @@ class DatabaseManager:
                      data['html_title'], data['html_description'], fetched_at, updated_at,
                      data['advisory_id']))
             else:
-                # Insert new record
                 cursor.execute('''INSERT INTO advisories (
                     advisory_id, title, link, pub_date, description, severity, impact, 
                     cvss_vector, vendor, cve_ids, products, summary, 
@@ -442,69 +411,40 @@ class DatabaseManager:
             conn.commit()
             return True
         except Exception as e:
-            logging.error(f"Advisory upsert error: {e}")
+            logging.error(f"Upsert Advisory Error: {e}")
             return False
         finally:
             conn.close()
 
     def update_metadata(self, key: str, value: str):
-        """Simple helper to set a key-value pair in system_metadata."""
         return self.execute_update("INSERT OR REPLACE INTO system_metadata (key, value) VALUES (?, ?)", (key, str(value)))
 
     def get_metadata(self, key: str) -> str:
-        """Simple helper to get a value from system_metadata."""
         rows = self.execute_query("SELECT value FROM system_metadata WHERE key = ?", (key,))
         return rows[0][0] if rows else ""
 
-
 # ---------------------------------------------------------
-# MODULE UTILITIES
+# UTILITY FUNCTIONS
 # ---------------------------------------------------------
 
 def get_advisory_by_link(link: str) -> Optional[Dict[str, Any]]:
-    """
-    A standalone helper function to get an advisory by its URL.
-    This is often used by the crawler to check if a URL has already been processed.
-    
-    Args:
-        link (str): The unique URL of the advisory.
-        
-    Returns:
-        Dict | None: The record as a dictionary, or None if not found.
-    """
+    """Helper for the crawler to check existence by URL."""
     db = DatabaseManager()
     rows = db.execute_query("SELECT * FROM advisories WHERE link = ?", (link,))
     if rows:
-        # SQLite returns tuples (idx 0, idx 1...), we must map back to dict keys manually
-        # This brittle coupling (index order) is a downside of raw SQL vs ORMs (like SQLAlchemy).
         r = rows[0]
+        # Manual Mapping (Index -> Key)
         return {
-            "advisory_id": r[0],
-            "title": r[1],
-            "link": r[2],
-            "pub_date": r[3],
-            "description": r[4],
-            "severity": r[5],
-            "impact": r[6],
-            "cvss_vector": r[7],
-            "vendor": r[8],
-            "cve_ids": r[9],
-            "products": r[10],
-            "summary": r[11],
-            "html_title": r[12],
-            "html_description": r[13],
-            "html_fetched_at": r[14],
-            "updated_at": r[15]
+            "advisory_id": r[0], "title": r[1], "link": r[2], "pub_date": r[3],
+            "description": r[4], "severity": r[5], "impact": r[6],
+            "cvss_vector": r[7], "vendor": r[8], "cve_ids": r[9],
+            "products": r[10], "summary": r[11], "html_title": r[12],
+            "html_description": r[13], "html_fetched_at": r[14], "updated_at": r[15]
         }
     return None
 
-# ---------------------------------------------------------
-# DIRECT EXECUTION
-# ---------------------------------------------------------
 if __name__ == "__main__":
-    # If run as a script, just initialize the DB.
-    # Useful for "setup" scripts.
     logging.basicConfig(level=logging.INFO)
-    print("Initializing Database...")
+    print("Initialize DB Schema...")
     db = DatabaseManager()
-    print(f"Database {DB_NAME} initialized/checked.")
+    print("Done.")

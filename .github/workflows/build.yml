@@ -1,0 +1,46 @@
+name: ProjectX Build & Sign
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pyinstaller
+
+    - name: Bundle Executable with PyInstaller
+      run: |
+        # Bundling app.py as entry point
+        # Including osqueryi.exe in the bin/ directory as required by OSQueryClient
+        pyinstaller --noconfirm --onefile --windowed --name "ProjectX" --add-binary "bin/osqueryi.exe;bin" app.py
+
+    - name: SignPath.io Signing
+      # This step requires SignPath account configuration
+      # It ensures the build integrity by signing the artifact directly from the CI runner
+      uses: signpath/github-action-submit-artifacts@v1
+      with:
+        api_token: ${{ secrets.SIGNPATH_API_TOKEN }}
+        organization_id: ${{ secrets.SIGNPATH_ORG_ID }}
+        project_slug: 'ProjectX'
+        signing_policy_slug: 'release-signing'
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        wait_for_completion: true
+        output_artifact_directory: 'dist/signed'

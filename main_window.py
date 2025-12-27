@@ -1,215 +1,158 @@
 """
 MODULE: main_window.py
-ProjectX Desktop UI Implementation
+================================================================================
+PROJECT:        ProjectX Endpoint Protection Platform (Academic Reference)
+AUTHOR:         ProjectX Development Team
+INSTITUTION:    University of Cybersecurity & Software Engineering
+DATE:           2025-12-27
+LICENSE:        MIT License (Educational)
+PYTHON VER:     3.11+
+================================================================================
 
-PURPOSE:
-This module defines the graphical user interface (GUI) for the application using PyQt6.
-It acts as the "View" and "Controller" in our MVC-like architecture.
-It is responsible for:
-1.  **Layout**: Arranging widgets (buttons, tables, graphs) on the screen.
-2.  **Interaction**: Responding to clicks, menu selections, and keyboard events.
-3.  **Coordination**: Starting background Worker threads and updating the UI when they finish.
+MODULE OVERVIEW:
+----------------
+This module implements the **Graphical User Interface (GUI)** using PyQt6.
+It serves as the "Presentation Layer" in our architectural stack.
 
-ARCHITECTURAL ROLE:
--------------------
-[User] <-> [MainWindow] <-> [Workers/Managers]
+ARCHITECTURAL PATTERNS:
+-----------------------
+1.  **Model-View-Controller (MVC)** (Loosely adapted for Qt):
+    -   **Model**: `GenericTableModel` wraps our raw data (lists of dicts) for the UI.
+    -   **View**: `QTableView`, `QLabel` display the data.
+    -   **Controller**: `MainWindow` handles user input and business logic coordination.
 
-The MainWindow *never* performs heavy tasks (like scanning or network requests) on the 
-main thread (UI thread). Doing so would freeze the application ("Application Not Responding").
-Instead, it offloads these tasks to `QThread` workers (defined in `workers.py`).
+2.  **Observer Pattern (Signals & Slots)**:
+    Qt's core communication mechanism. Instead of polling for changes, objects 
+    *emit* signals (events) which other objects *connect* to (callbacks).
+    Example: `worker.finished.connect(self.update_ui)`
 
-PEDAGOGICAL CONCEPTS:
----------------------
-- **PyQt6/Qt**: A powerful cross-platform GUI framework.
-- **Event Loop**: The infinite loop that waits for user input.
-- **Signals & Slots**: The Observer pattern used for communication between objects/threads.
-- **Stylesheets (QSS)**: CSS-like styling for desktop apps.
+3.  **Asynchronous UI Updates**:
+    The UI creates background threads (`workers.py`) for heavy tasks and 
+    updates widgets only when the thread emits data back to the main loop.
 
-AUTHOR: ProjectX Team
-DATE: 2025-12-27
+4.  **Composite Pattern**:
+    The UI is built as a tree of Widgets (Tabs check Table checks Header...).
+
 """
 
-import sys          # System arguments (argv)
-import logging      # Log handling
-import json         # JSON parsing
-import datetime     # Date formatting
-import os           # File paths
+import sys
+import logging
+import json
+import datetime
+import os
+from typing import List, Dict, Any, Optional
 
 # PyQt6 Imports
-# We import specific classes to keep the namespace clean.
-# QMainWindow: The top-level application window.
-# QWidget: The base class for all UI objects.
-# QVBoxLayout/QHBoxLayout: Vertical/Horizontal layout managers.
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QTabWidget, QTableView, 
     QLabel, QPushButton, QHBoxLayout, QSplitter, QTreeWidget, QTreeWidgetItem,
     QFormLayout, QLineEdit, QCheckBox, QSlider, QProgressBar, QFrame, 
     QHeaderView, QTextEdit, QAbstractItemView, QMenu, QMessageBox, QDialog, 
     QSizePolicy, QGroupBox, QScrollArea, QFileDialog, QGridLayout, QStyle, 
-    QStyleOptionButton
+    QStyleOptionButton, QApplication
 )
-
-# Core Qt Classes (Non-GUI)
-# Qt: Constants (Alignment, Keys, etc.)
-# pyqtSignal: Custom event definitions.
-from PyQt6.QtCore import Qt, QAbstractTableModel, QTimer, pyqtSignal, QObject, QRect
-
-# GUI Graphics Classes
-# QColor/QBrush: Painting colors.
-from PyQt6.QtGui import QStandardItemModel, QStandardItem, QColor, QBrush, QAction, QFont
+from PyQt6.QtCore import Qt, QAbstractTableModel, QTimer, pyqtSignal, QObject, QRect, QUrl
+from PyQt6.QtGui import QStandardItemModel, QStandardItem, QColor, QBrush, QAction, QFont, QDesktopServices
 
 # Internal Project Modules
 from workers import (
     ScanWorker, ProcessWorker, AIWorker, AdvisoryWorker, 
-    FIMWorker, YaraScanWorker, ReputationWorker
+    FIMWorker, YaraScanWorker
 )
 from db_manager import DatabaseManager
-from managers import ConfigManager, ResponseManager, InventoryManager
-import psutil  # For process lists (if needed directly)
+from managers import ConfigManager, ResponseManager, SoftwareManager, ThreatIntelManager
 
-# ---------------------------------------------------------
-# STYLESHEET
-# ---------------------------------------------------------
-# We use a global string for CSS-like styling.
-# In a real large app, this might be loaded from a .qss file.
+# ------------------------------------------------------------------------------
+# STYLESHEET (The "CSS" of Desktop Apps)
+# ------------------------------------------------------------------------------
 DARK_STYLESHEET = """
 QMainWindow { background-color: #1e1e1e; color: #ffffff; }
 
 /* Tabs */
 QTabWidget::pane { border: 1px solid #333333; background: #2d2d2d; }
 QTabBar::tab { 
-    background: #333333; 
-    color: #aaaaaa; 
-    padding: 10px 20px; 
-    margin-right: 5px; 
-    border-top-left-radius: 4px; 
-    border-top-right-radius: 4px; 
+    background: #333333; color: #aaaaaa; padding: 10px 20px; 
+    border-top-left-radius: 4px; border-top-right-radius: 4px; 
 }
 QTabBar::tab:selected { background: #007acc; color: white; border-bottom: 2px solid white; }
 QTabBar::tab:hover { background: #444444; }
 
 /* Tables */
 QTableView { 
-    background-color: #252526; 
-    color: #d4d4d4; 
-    gridline-color: #333333; 
-    border: none; 
+    background-color: #252526; color: #d4d4d4; 
+    gridline-color: #333333; border: none; 
     selection-background-color: #37373d;
 }
 QHeaderView::section { 
-    background-color: #333333; 
-    color: #ffffff; 
-    padding: 4px; 
-    border: 1px solid #444444; 
-    font-weight: bold;
+    background-color: #333333; color: #ffffff; 
+    padding: 4px; border: 1px solid #444444; font-weight: bold;
 }
 
-/* Labels */
+/* Common Widgets */
 QLabel { color: #d4d4d4; font-size: 14px; }
 QLabel#Header { font-size: 16px; font-weight: bold; margin-bottom: 5px; color: #ffffff; }
-QLabel#Desc { font-size: 12px; color: #aaaaaa; margin-bottom: 10px; }
-
-/* Buttons */
 QPushButton { 
-    background-color: #0e639c; 
-    color: white; 
-    border: none; 
-    padding: 8px 16px; 
-    border-radius: 4px; 
+    background-color: #0e639c; color: white; border: none; 
+    padding: 8px 16px; border-radius: 4px; 
 }
 QPushButton:hover { background-color: #1177bb; }
 QPushButton:disabled { background-color: #3a3d41; color: #888888; }
-
-/* Inputs */
-QLineEdit { background-color: #3c3c3c; color: white; border: 1px solid #555555; padding: 4px; }
-QTextEdit { background-color: #1e1e1e; color: #cccccc; font-family: Consolas, monospace; border: 1px solid #333333; }
-
-/* Misc */
-QDialog { background-color: #2d2d2d; color: white; }
-QGroupBox { border: 1px solid #444444; margin-top: 20px; font-weight: bold; color: #ddd; }
-QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 3px; }
+QLineEdit, QTextEdit { 
+    background-color: #3c3c3c; color: white; 
+    border: 1px solid #555555; padding: 4px; 
+}
 """
 
-# ---------------------------------------------------------
-# UI HELPERS (Models & Views)
-# ---------------------------------------------------------
+# ------------------------------------------------------------------------------
+# HELPER CLASSES
+# ------------------------------------------------------------------------------
 
 class GenericTableModel(QStandardItemModel):
     """
-    A reusable table model class extending QStandardItemModel.
-    
-    Why subclass?
-    To provide a cleaner API for initialization (`__init__` with headers).
-    QStandardItemModel is a standard generic model for storing custom data in a grid.
+    A reusable wrapper for QStandardItemModel.
+    Simplifies creating a table with fixed headers.
     """
-    def __init__(self, headers):
+    def __init__(self, headers: List[str]):
         super().__init__()
         self.setHorizontalHeaderLabels(headers)
 
 class CheckableHeaderView(QHeaderView):
     """
-    A Custom Header View that draws a checkbox in the first column header.
-    
-    Why?
-    Standard QHeaderView doesn't support widgets (like checkboxes) natively.
-    We must use the `paintSection` method to manually draw the checkbox control.
+    Custom Header that paints a checkbox in the first column.
+    Used for "Select All" functionality in tables.
     """
-    toggled = pyqtSignal(bool) # Signal emitted when the header checkbox is clicked
+    toggled = pyqtSignal(bool) # Output signal
 
     def __init__(self, orientation, parent=None):
         super().__init__(orientation, parent)
         self.isOn = False
 
     def paintSection(self, painter, rect, logicalIndex):
-        """
-        Custom painting logic.
-        If it's column 0, draw a checkbox. Otherwise, draw normal header.
-        """
         painter.save()
         super().paintSection(painter, rect, logicalIndex)
         painter.restore()
 
         if logicalIndex == 0:
-            # Create a Style Option to define how the checkbox looks
             option = QStyleOptionButton()
-            # Position it slightly offset
             option.rect = QRect(rect.x() + 5, rect.y() + 5, 20, 20)
             option.state = QStyle.StateFlag.State_Enabled | QStyle.StateFlag.State_Active
-            
-            if self.isOn:
-                option.state |= QStyle.StateFlag.State_On
-            else:
-                option.state |= QStyle.StateFlag.State_Off
-                
-            # Use the application style to draw the control
+            if self.isOn: option.state |= QStyle.StateFlag.State_On
+            else: option.state |= QStyle.StateFlag.State_Off
             self.style().drawControl(QStyle.ControlElement.CE_CheckBox, option, painter)
 
     def mousePressEvent(self, event):
-        """
-        Detect clicks on the custom header checkbox.
-        """
         if self.logicalIndexAt(event.pos()) == 0:
             self.isOn = not self.isOn
-            self.toggled.emit(self.isOn) # Notify the Window to toggle all rows
-            self.viewport().update() # Redraw
+            self.toggled.emit(self.isOn)
+            self.viewport().update()
         super().mousePressEvent(event)
 
-# ---------------------------------------------------------
-# LOGGING HANDLER
-# ---------------------------------------------------------
-
 class LogSignal(QObject):
-    """
-    A workaround class to allow a Python logging.Handler to emit Qt signals.
-    Python's `logging` classes are NOT QObjects, so they can't have `pyqtSignal`.
-    We compose this QObject inside our handler.
-    """
+    """Redirects logging to Qt Signals."""
     log_signal = pyqtSignal(str)
 
 class QtLogHandler(logging.Handler):
-    """
-    Custom Logging Handler that redirects logging.info() calls to the GUI.
-    """
+    """Integrates Python's logging module with PyQt."""
     def __init__(self):
         super().__init__()
         self.signal_wrapper = LogSignal()
@@ -218,1423 +161,419 @@ class QtLogHandler(logging.Handler):
     def emit(self, record):
         try:
             msg = self.format(record)
-            self.log_signal.emit(msg) # Send text to GUI thread
-        except Exception:
-            pass
+            self.log_signal.emit(msg)
+        except: pass
 
-# ---------------------------------------------------------
-# MAIN WINDOW CLASS
-# ---------------------------------------------------------
+# ------------------------------------------------------------------------------
+# MAIN WINDOW CONTROLLER
+# ------------------------------------------------------------------------------
 
 class MainWindow(QMainWindow):
     """
-    The Master Controller of the Desktop Application.
+    The Main Application Window.
+    Coordinates all sub-widgets and logic flow.
     """
     def __init__(self):
         super().__init__()
         
-        # Window Setup
-        self.setWindowTitle("ProjectX Desktop - Security Dashboard")
-        self.resize(1400, 950) # HD resolution default
+        # 1. Base Configuration
+        self.setWindowTitle("ProjectX Endpoint Protection Platform")
+        self.resize(1400, 950)
         self.setStyleSheet(DARK_STYLESHEET)
         
-        # 1. Setup Internal Logging
-        # This redirects 'logging.info("...")' to the 'Logs' tab in the UI.
+        # 2. Logging Setup
         self.log_handler = QtLogHandler()
         self.log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         logging.getLogger().addHandler(self.log_handler)
         logging.getLogger().setLevel(logging.INFO)
         
-        # 2. Initialize Managers (The Business Logic)
+        # 3. Manager Initialization (The Brains)
         self.db = DatabaseManager()
-        self.inv_mgr = InventoryManager()
+        self.inv_mgr = SoftwareManager()
+        self.soft_mgr = SoftwareManager()
         self.response_mgr = ResponseManager()
+        self.ti_mgr = ThreatIntelManager()
         
-        # 3. Setup Layout
-        # PyQt uses a hierarchical layout system.
-        # Central Widget -> Main Layout -> Tab Widget -> Tabs -> [Content]
+        # 4. UI Construction
+        self.setup_ui()
+        
+        # 5. Background Services
+        self.start_background_workers()
+        
+        # 6. Initial State
+        self.status_bar = self.statusBar()
+        self.status_bar.showMessage("System Initialized. Engine Ready.")
+        
+        # Load Data
+        self.log_handler.log_signal.connect(self.append_log)
+        self.refresh_dashboard_data()
+
+    def setup_ui(self):
+        """Constructs the high-level layout."""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(20, 20, 20, 20) 
+        main_layout.setContentsMargins(10, 10, 10, 10)
         
-        # 4. Create Main Tabs
+        # The Tab Widget is the primary navigation container
         self.main_tabs = QTabWidget()
-        self.main_tabs.setTabPosition(QTabWidget.TabPosition.North)
         main_layout.addWidget(self.main_tabs)
         
-        # 5. Build UI Sections (Functionally Grouped)
+        # Build individual Tabs
         self.init_overview_tab()
         self.init_monitor_tab()
         self.init_assets_tab()
         self.init_system_tab()
-        self.init_config_tab()
-        
-        # 6. Status Bar (Bottom strip)
-        self.status_bar = self.statusBar()
-        self.status_bar.showMessage("System Ready")
-        
-        # 7. Connect Log Handler
-        self.log_handler.log_signal.connect(self.append_log)
-        
-        # 8. Start Background Monitors
-        # Process Monitor (Updates process list every 5s)
+        self.init_logs_tab()
+
+    def start_background_workers(self):
+        """Starts persistent daemon threads."""
+        # Process Monitor
         self.proc_worker = ProcessWorker()
         self.proc_worker.updated.connect(self.update_process_view)
         self.proc_worker.start()
-
-        # FIM Monitor (Watches files in real-time)
+        
+        # FIM (File Integrity Monitor)
         self.fim_worker = FIMWorker()
         self.fim_worker.alert.connect(self.handle_fim_alert)
         self.fim_worker.start()
-        
-        # 9. Initial Data Load
-        self.load_api_keys()
-        self.refresh_dashboard_data()
-        self.refresh_threat_feed()
-    
+
     def closeEvent(self, event):
-        """
-        Cleanup when user clicks 'X'.
-        Stop threads gracefully to avoid segfaults or hanging processes.
-        """
+        """Cleanup on Exit."""
         logging.getLogger().removeHandler(self.log_handler)
-        if hasattr(self, 'proc_worker'):
-            self.proc_worker.stop()
-        if hasattr(self, 'fim_worker'):
-            self.fim_worker.stop()
+        if hasattr(self, 'proc_worker'): self.proc_worker.stop()
+        if hasattr(self, 'fim_worker'): self.fim_worker.stop()
         super().closeEvent(event)
 
-    def append_log(self, msg):
-        """Slot to receive log messages and append to the text box."""
-        self.log_viewer.append(msg)
-        # Auto-scroll to bottom
-        cursor = self.log_viewer.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        self.log_viewer.setTextCursor(cursor)
-
-    def configure_table(self, table):
-        """
-        Applies standard ProjectX styling and behavior to a QTableView.
-        Makes it look like a read-only list rather than a spreadsheet.
-        """
-        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers) # Read Only
-        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows) # Select full row
-        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        table.setWordWrap(True) # Wrap long text
-        table.setTextElideMode(Qt.TextElideMode.ElideNone)
-        # Resize behavior
-        table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setStretchLastSection(True)
-
     # ---------------------------------------------------------
-    # TAB INITIALIZATION (View Construction)
+    # TAB CONSTRUCTION
     # ---------------------------------------------------------
 
     def init_overview_tab(self):
-        """Builds the 'Overview' Dashboard."""
+        """Creates the Dashboard View."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
-        # We use nested tabs for categorization
-        sub_tabs = QTabWidget()
-        layout.addWidget(sub_tabs)
+        # Header Area: KPI Cards
+        layout.addWidget(self.create_header("Security Posture", "Real-time overview of system risks."))
         
-        # --- SUB-TAB: DASHBOARD ---
-        dash_tab = QWidget()
-        d_layout = QVBoxLayout(dash_tab)
-        d_layout.addWidget(self.create_header("Risk Dashboard", "High-level overview of system security posture."))
+        kpi_layout = QHBoxLayout()
+        self.kpi_assets = self.create_kpi_card("Assets", "📦", self.scan_software)
+        self.kpi_network = self.create_kpi_card("Network", "🌐", self.scan_network)
+        self.kpi_identity = self.create_kpi_card("Identity", "👤", self.scan_identity)
+        self.kpi_vulns = self.create_kpi_card("Threats", "🛡️", self.scan_full)
         
-        # KPI Grid (Top Stats)
-        top_row = QWidget()
-        top_layout = QVBoxLayout(top_row)
-        self.kpi_grid = QGridLayout()
-        top_layout.addLayout(self.kpi_grid)
+        kpi_layout.addWidget(self.kpi_assets)
+        kpi_layout.addWidget(self.kpi_network)
+        kpi_layout.addWidget(self.kpi_identity)
+        kpi_layout.addWidget(self.kpi_vulns)
+        layout.addLayout(kpi_layout)
         
-        # Create KPI Cards (Assets, Network, Identity, Health, Vulns, Changes)
-        # We store references (self.kpi_*) so we can update their text later.
-        self.kpi_assets = self.create_kpi_card("Assets", "📦")
-        self.kpi_assets.btn_scan.clicked.connect(lambda: self.run_partial_scan(['software', 'updates']))
-        self.kpi_grid.addWidget(self.kpi_assets, 0, 0)
+        # Helper: Horizontal Divider
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setStyleSheet("color: #444;")
+        layout.addWidget(line)
         
-        self.kpi_network = self.create_kpi_card("Network", "🌐")
-        self.kpi_network.btn_scan.clicked.connect(lambda: self.run_partial_scan(['network', 'exposure', 'persistence']))
-        self.kpi_grid.addWidget(self.kpi_network, 0, 1)
-        
-        self.kpi_identity = self.create_kpi_card("Identity", "👤")
-        self.kpi_identity.btn_scan.clicked.connect(lambda: self.run_partial_scan(['identity']))
-        self.kpi_grid.addWidget(self.kpi_identity, 0, 2)
-        
-        self.kpi_health = self.create_kpi_card("Health", "❤️")
-        self.kpi_health.btn_scan.clicked.connect(lambda: self.run_partial_scan(['health']))
-        self.kpi_grid.addWidget(self.kpi_health, 1, 0)
-        
-        self.kpi_vulns = self.create_kpi_card("Vulnerabilities", "🐞", "#e51400") # Red
-        self.kpi_vulns.btn_scan.clicked.connect(lambda: self.run_partial_scan(['software']))
-        self.kpi_grid.addWidget(self.kpi_vulns, 1, 1)
-        
-        self.kpi_changes = self.create_kpi_card("Changes", "📝", "#f0a30a") # Orange
-        self.kpi_changes.btn_scan.clicked.connect(lambda: self.run_partial_scan(['all']))
-        self.kpi_grid.addWidget(self.kpi_changes, 1, 2)
-        
-        d_layout.addWidget(top_row)
-        
-        # Scan Control Bar
-        ctrl_layout = QHBoxLayout()
-        self.btn_scan = QPushButton("🔄 Full System Scan")
-        self.btn_scan.clicked.connect(lambda: self.run_partial_scan(['all']))
-        ctrl_layout.addWidget(self.btn_scan)
-        ctrl_layout.addStretch()
-        d_layout.addLayout(ctrl_layout)
-        
-        # Scan Progress Bar
-        self.scan_progress = QProgressBar()
-        self.scan_progress.hide() # Hidden until scan starts
-        d_layout.addWidget(self.scan_progress)
-
-        # Risk Table (Top Risks)
-        d_layout.addWidget(self.create_header("Top Risks", "Services running on exposed ports with high risk."))
-        self.risk_table = QTableView()
-        self.configure_table(self.risk_table)
-        self.risk_model = GenericTableModel(["Port", "Protocol", "Process", "Risk Score"])
-        self.risk_table.setModel(self.risk_model)
-        self.risk_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        # Right-Click Menu
-        self.risk_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.risk_table.customContextMenuRequested.connect(lambda pos: self.show_context_menu(pos, self.risk_table, "risk"))
-        d_layout.addWidget(self.risk_table)
-
-        # FIM Alerts Table
-        d_layout.addWidget(self.create_header("FIM Alerts", "File Integrity Monitoring events."))
-        self.fim_table = QTableView()
-        self.configure_table(self.fim_table)
-        self.fim_model = GenericTableModel(["Time", "File", "Action", "Severity"])
-        self.fim_table.setModel(self.fim_model)
-        self.fim_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.fim_table.setMaximumHeight(200) # Keep it small
-        d_layout.addWidget(self.fim_table)
-        
-        sub_tabs.addTab(dash_tab, "Dashboard")
-        
-        # --- SUB-TAB: THREAT INTEL ---
-        intel_tab = QWidget()
-        i_layout = QVBoxLayout(intel_tab)
-        i_layout.addWidget(self.create_header("Threat Intelligence Feed", "Latest security advisories."))
-        
-        self.feed_offset = 0
-        
-        i_ctrl = QHBoxLayout()
-        btn_refresh_intel = QPushButton("🔄 Refresh Feed (Reset)")
-        btn_refresh_intel.clicked.connect(self.refresh_threat_feed)
-        
-        self.btn_fetch_more_intel = QPushButton("⏬ Fetch More (Older)")
-        self.btn_fetch_more_intel.clicked.connect(self.fetch_more_intel)
-        
-        i_ctrl.addWidget(btn_refresh_intel)
-        i_ctrl.addWidget(self.btn_fetch_more_intel)
-        i_ctrl.addStretch()
-        i_layout.addLayout(i_ctrl)
+        # Security Feed (Bottom Half)
+        layout.addWidget(self.create_header("Threat Intelligence Feed", "Live advisories from vendor sources."))
         
         self.intel_table = QTableView()
         self.configure_table(self.intel_table)
-        self.intel_model = GenericTableModel(["Date", "Severity", "Title", "Impact", "CVEs"])
+        self.intel_model = GenericTableModel(["Severity", "Components", "Title", "Date"])
         self.intel_table.setModel(self.intel_model)
-        self.intel_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.intel_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch) # Title stretches
+        self.intel_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.intel_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents) # Severity
+        layout.addWidget(self.intel_table)
         
-        self.intel_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.intel_table.customContextMenuRequested.connect(lambda pos: self.show_context_menu(pos, self.intel_table, "intel"))
-        i_layout.addWidget(self.intel_table)
+        # Controls
+        btn_refresh = QPushButton("Refresh Feed")
+        btn_refresh.clicked.connect(self.refresh_threat_feed)
+        layout.addWidget(btn_refresh)
         
-        sub_tabs.addTab(intel_tab, "Threat Intelligence")
-        
-        self.main_tabs.addTab(tab, "Overview")
+        self.main_tabs.addTab(tab, "Dashboard")
 
     def init_monitor_tab(self):
-        """Builds the 'Live Monitor' for Processes and Network."""
+        """Live Monitoring of System Activity."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        
+        # Nested Tabs for Organization
         sub_tabs = QTabWidget()
         layout.addWidget(sub_tabs)
         
-        # --- PROCESSES ---
-        proc_tab = QWidget()
-        p_layout = QVBoxLayout(proc_tab)
-        p_layout.addWidget(self.create_header("Running Processes", "Real-time list of active processes."))
+        # -- Processes --
+        p_tab = QWidget()
+        p_layout = QVBoxLayout(p_tab)
         
-        # Toolbar (Terminate, AI, VT)
-        self.btn_proc_term, self.btn_proc_ai, self.btn_proc_vt = self.create_toolbar(p_layout)
-        # Connect Actions
-        self.btn_proc_term.clicked.connect(lambda: self.run_bulk_action("terminate", self.proc_model, "proc"))
-        self.btn_proc_vt.clicked.connect(lambda: self.run_bulk_action("vt", self.proc_model, "proc"))
-        self.btn_proc_ai.clicked.connect(lambda: self.run_bulk_action("ai", self.proc_model, "proc"))
-
-        # Auto-refresh Toggle
-        ctrl_layout = QHBoxLayout()
-        self.chk_autorefresh = QCheckBox("Auto-refresh (5s)")
-        self.chk_autorefresh.stateChanged.connect(self.toggle_process_monitor)
-        ctrl_layout.addWidget(self.chk_autorefresh)
-        p_layout.addLayout(ctrl_layout)
+        # Toolbar
+        toolbar = QHBoxLayout()
+        self.btn_kill = QPushButton("❌ Terminate")
+        self.btn_kill.clicked.connect(self.kill_selected_process)
+        self.btn_ai_analyze = QPushButton("🧠 AI Analyze")
+        self.btn_ai_analyze.clicked.connect(self.ai_analyze_process)
+        toolbar.addWidget(self.btn_kill)
+        toolbar.addWidget(self.btn_ai_analyze)
+        toolbar.addStretch()
+        p_layout.addLayout(toolbar)
         
+        # Table
         self.proc_table = QTableView()
         self.configure_table(self.proc_table)
-        # Header: Checkbox + Columns
-        self.proc_model = GenericTableModel(["", "PID", "Name", "Path", "Mem (MB)", "CPU %", "User"])
+        self.proc_model = GenericTableModel(["PID", "Name", "Path", "Memory", "User"])
         self.proc_table.setModel(self.proc_model)
-        
-        # Custom Checkable Header
-        self.proc_header = CheckableHeaderView(Qt.Orientation.Horizontal, self.proc_table)
-        self.proc_table.setHorizontalHeader(self.proc_header)
-        self.proc_header.toggled.connect(self.toggle_all_processes)
-        
-        # Updates
-        self.proc_model.itemChanged.connect(lambda item: self.update_toolbar_state(self.proc_model, [self.btn_proc_term, self.btn_proc_ai, self.btn_proc_vt]))
-        
-        # Resize logic
         self.proc_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.proc_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed) # Checkbox
-        self.proc_table.setColumnWidth(0, 30)
-        
-        self.proc_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.proc_table.customContextMenuRequested.connect(lambda pos: self.show_context_menu(pos, self.proc_table, "proc"))
         p_layout.addWidget(self.proc_table)
+        sub_tabs.addTab(p_tab, "Processes")
         
-        sub_tabs.addTab(proc_tab, "Processes")
+        # -- Network --
+        n_tab = QWidget()
+        n_layout = QVBoxLayout(n_tab)
         
-        # --- NETWORK ---
-        net_tab = QWidget()
-        n_layout = QVBoxLayout(net_tab)
-        n_layout.addWidget(self.create_header("Network Activity", "All active TCP/UDP connections."))
+        btn_scan_net = QPushButton("Run Network Scan")
+        btn_scan_net.clicked.connect(self.scan_network)
+        n_layout.addWidget(btn_scan_net)
         
-        n_ctrl = QHBoxLayout()
-        btn_scan_net = QPushButton("🔄 Scan Network")
-        btn_scan_net.clicked.connect(lambda: self.run_partial_scan(['network']))
-        n_ctrl.addWidget(btn_scan_net)
-        n_ctrl.addStretch()
-        n_layout.addLayout(n_ctrl)
-
         self.net_table = QTableView()
         self.configure_table(self.net_table)
-        self.net_model = GenericTableModel(["PID", "L. Addr", "R. Addr", "State", "Proto"])
+        self.net_model = GenericTableModel(["PID", "Local Addr", "Remote Addr", "State", "Proto"])
         self.net_table.setModel(self.net_model)
         self.net_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.net_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.net_table.customContextMenuRequested.connect(lambda pos: self.show_context_menu(pos, self.net_table, "net"))
         n_layout.addWidget(self.net_table)
+        sub_tabs.addTab(n_tab, "Network")
         
-        # Hosts File
-        n_layout.addWidget(self.create_header("Hosts File", "Static hostname mappings."))
-        self.hosts_table = QTableView()
-        self.configure_table(self.hosts_table)
-        self.hosts_model = GenericTableModel(["Hostname", "IP Address"])
-        self.hosts_table.setModel(self.hosts_model)
-        self.hosts_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.hosts_table.setMaximumHeight(150)
-        n_layout.addWidget(self.hosts_table)
-        
-        sub_tabs.addTab(net_tab, "Network")
-        
-        # --- EXPOSURE ---
-        exp_tab = QWidget()
-        e_layout = QVBoxLayout(exp_tab)
-        e_layout.addWidget(self.create_header("Exposure Monitor", "Services listening on open ports."))
-        
-        e_ctrl = QHBoxLayout()
-        btn_scan_exp = QPushButton("🔄 Scan Services")
-        btn_scan_exp.clicked.connect(lambda: self.run_partial_scan(['exposure']))
-        e_ctrl.addWidget(btn_scan_exp)
-        e_ctrl.addStretch()
-        e_layout.addLayout(e_ctrl)
-
-        self.exposure_table = QTableView()
-        self.configure_table(self.exposure_table)
-        self.exposure_model = GenericTableModel(["Port", "Protocol", "Process", "User", "Path"])
-        self.exposure_table.setModel(self.exposure_model)
-        self.exposure_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        e_layout.addWidget(self.exposure_table)
-        sub_tabs.addTab(exp_tab, "Exposure")
-
         self.main_tabs.addTab(tab, "Live Monitor")
 
     def init_assets_tab(self):
-        """Builds the 'Assets' tab (Software, Hardware, Identity)."""
+        """Inventory Management."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        sub_tabs = QTabWidget()
-        layout.addWidget(sub_tabs)
         
-        # --- SOFTWARE ---
-        soft_tab = QWidget()
-        s_layout = QVBoxLayout(soft_tab)
-        s_layout.addWidget(self.create_header("Installed Software", "List of detected applications."))
+        btn_scan = QPushButton("Refresh Inventory")
+        btn_scan.clicked.connect(self.scan_software)
+        layout.addWidget(btn_scan)
         
-        s_ctrl = QHBoxLayout()
-        btn_scan_soft = QPushButton("🔄 Scan Software")
-        btn_scan_soft.clicked.connect(lambda: self.run_partial_scan(['software'])) 
-        s_ctrl.addWidget(btn_scan_soft)
-        s_ctrl.addStretch()
-        s_layout.addLayout(s_ctrl)
-
         self.inv_table = QTableView()
         self.configure_table(self.inv_table)
-        self.inv_model = GenericTableModel(["Name", "Version", "Vendor", "Install Date", "Latest Version", "Update Available"])
+        # Columns mapped to installed_software table
+        self.inv_model = GenericTableModel(["Name", "Version", "Publisher", "Install Date"])
         self.inv_table.setModel(self.inv_model)
-        s_layout.addWidget(self.inv_table)
-        sub_tabs.addTab(soft_tab, "Software")
+        self.inv_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.inv_table)
         
-        # --- DRIVERS ---
-        drv_tab = QWidget()
-        drv_layout = QVBoxLayout(drv_tab)
-        drv_layout.addWidget(self.create_header("System Drivers", "Installed Kernel Drivers."))
-        
-        dr_ctrl = QHBoxLayout()
-        btn_scan_drv = QPushButton("🔄 Scan Drivers")
-        btn_scan_drv.clicked.connect(lambda: self.run_partial_scan(['drivers']))
-        dr_ctrl.addWidget(btn_scan_drv)
-        dr_ctrl.addStretch()
-        drv_layout.addLayout(dr_ctrl)
-
-        self.drv_table = QTableView()
-        self.configure_table(self.drv_table)
-        self.drv_model = GenericTableModel(["Name", "Description", "Provider", "Status", "Signed"])
-        self.drv_table.setModel(self.drv_model)
-        drv_layout.addWidget(self.drv_table)
-        sub_tabs.addTab(drv_tab, "Drivers")
-
-        # --- EXTENSIONS ---
-        ext_tab = QWidget()
-        ext_layout = QVBoxLayout(ext_tab)
-        ext_layout.addWidget(self.create_header("Browser Extensions", "Installed Chrome/Firefox Extensions."))
-        
-        ex_ctrl = QHBoxLayout()
-        btn_scan_ext = QPushButton("🔄 Scan Extensions")
-        btn_scan_ext.clicked.connect(lambda: self.run_partial_scan(['extensions']))
-        ex_ctrl.addWidget(btn_scan_ext)
-        ex_ctrl.addStretch()
-        ext_layout.addLayout(ex_ctrl)
-
-        self.ext_table = QTableView()
-        self.configure_table(self.ext_table)
-        self.ext_model = GenericTableModel(["Name", "Browser", "Version", "ID", "Status"])
-        self.ext_table.setModel(self.ext_model)
-        ext_layout.addWidget(self.ext_table)
-        sub_tabs.addTab(ext_tab, "Extensions")
-
-        # --- CERTIFICATES ---
-        cert_tab = QWidget()
-        c_layout = QVBoxLayout(cert_tab)
-        c_layout.addWidget(self.create_header("Certificates", "System Root and Intermediate Certificates."))
-        
-        c_ctrl = QHBoxLayout()
-        btn_scan_cert = QPushButton("🔄 Scan Certificates")
-        btn_scan_cert.clicked.connect(lambda: self.run_partial_scan(['certificates']))
-        c_ctrl.addWidget(btn_scan_cert)
-        c_ctrl.addStretch()
-        c_layout.addLayout(c_ctrl)
-
-        self.cert_table = QTableView()
-        self.configure_table(self.cert_table)
-        self.cert_model = GenericTableModel(["Subject", "Issuer", "Expiry", "Root?"])
-        self.cert_table.setModel(self.cert_model)
-        self.cert_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        c_layout.addWidget(self.cert_table)
-        sub_tabs.addTab(cert_tab, "Certificates")
-        
-        # --- IDENTITY ---
-        id_tab = QWidget()
-        i_layout = QVBoxLayout(id_tab)
-        i_layout.addWidget(self.create_header("User Accounts", "Local user accounts and login sessions."))
-        
-        id_ctrl = QHBoxLayout()
-        btn_scan_id = QPushButton("🔄 Scan Users")
-        btn_scan_id.clicked.connect(lambda: self.run_partial_scan(['identity']))
-        id_ctrl.addWidget(btn_scan_id)
-        id_ctrl.addStretch()
-        i_layout.addLayout(id_ctrl)
-
-        self.user_table = QTableView()
-        self.configure_table(self.user_table)
-        self.user_model = GenericTableModel(["Username", "UID", "Description", "Last Login"])
-        self.user_table.setModel(self.user_model)
-        self.user_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        i_layout.addWidget(self.user_table)
-        sub_tabs.addTab(id_tab, "Identity")
-        
-        # --- MALWARE SCANNER ---
-        mal_tab = QWidget()
-        m_layout = QVBoxLayout(mal_tab)
-        m_layout.addWidget(self.create_header("YARA Malware Scanner", "Scan files or directories against YARA rules."))
-
-        m_ctrl = QHBoxLayout()
-        self.txt_scan_path = QLineEdit()
-        self.txt_scan_path.setPlaceholderText("Select directory or file to scan...")
-        btn_browse = QPushButton("Browse")
-        btn_browse.clicked.connect(self.browse_scan_path)
-        self.btn_yara_scan = QPushButton("Start Scan")
-        self.btn_yara_scan.clicked.connect(self.start_yara_scan)
-        
-        m_ctrl.addWidget(self.txt_scan_path)
-        m_ctrl.addWidget(btn_browse)
-        m_ctrl.addWidget(self.btn_yara_scan)
-        m_layout.addLayout(m_ctrl)
-        
-        self.lbl_scan_status = QLabel("")
-        m_layout.addWidget(self.lbl_scan_status)
-
-        self.mal_table = QTableView()
-        self.configure_table(self.mal_table)
-        self.mal_model = GenericTableModel(["File", "Rule", "Tags", "Meta"])
-        self.mal_table.setModel(self.mal_model)
-        self.mal_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        m_layout.addWidget(self.mal_table)
-        
-        sub_tabs.addTab(mal_tab, "Malware Scanner")
-
         self.main_tabs.addTab(tab, "Assets")
 
     def init_system_tab(self):
-        """Builds the 'System' tab (Health, Updates, Persistence, Vulnerabilities)."""
+        """System Health & Malware Scanning."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        sub_tabs = QTabWidget()
-        layout.addWidget(sub_tabs)
         
-        # --- HEALTH DASHBOARD ---
-        health_tab = QWidget()
-        h_layout = QVBoxLayout(health_tab)
+        # Scan Input Area
+        grp_yara = QGroupBox("Targeted Malware Scan (YARA)")
+        y_layout = QHBoxLayout(grp_yara)
         
-        # 1. Overall System Health Widgets
-        h_layout.addWidget(self.create_header("System Health Monitor", "Real-time performance metrics."))
+        self.txt_scan_target = QLineEdit()
+        self.txt_scan_target.setPlaceholderText("Select file or folder to scan...")
+        btn_browse = QPushButton("Browse")
+        btn_browse.clicked.connect(lambda: self.txt_scan_target.setText(QFileDialog.getExistingDirectory(self, "Select Folder")))
+        btn_start_scan = QPushButton("Start Scan")
+        btn_start_scan.clicked.connect(self.start_manual_scan)
         
-        health_metrics = QHBoxLayout()
-        health_metrics.setSpacing(20)
+        y_layout.addWidget(self.txt_scan_target)
+        y_layout.addWidget(btn_browse)
+        y_layout.addWidget(btn_start_scan)
+        layout.addWidget(grp_yara)
         
-        # CPU Widget
-        cpu_grp = QGroupBox("CPU Usage")
-        cpu_l = QVBoxLayout(cpu_grp)
-        self.lbl_cpu_val = QLabel("0%")
-        self.lbl_cpu_val.setStyleSheet("font-size: 24px; font-weight: bold; color: #00ffff;")
-        self.prog_cpu = QProgressBar()
-        self.prog_cpu.setTextVisible(False)
-        self.prog_cpu.setStyleSheet("QProgressBar::chunk { background-color: #00ffff; }")
-        cpu_l.addWidget(self.lbl_cpu_val, 0, Qt.AlignmentFlag.AlignCenter)
-        cpu_l.addWidget(self.prog_cpu)
-        health_metrics.addWidget(cpu_grp)
+        # Results Table
+        self.mal_table = QTableView()
+        self.configure_table(self.mal_table)
+        self.mal_model = GenericTableModel(["File", "Rule Match", "Tags", "Metadata"])
+        self.mal_table.setModel(self.mal_model)
+        self.mal_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.mal_table)
         
-        # RAM Widget
-        ram_grp = QGroupBox("Memory Usage")
-        ram_l = QVBoxLayout(ram_grp)
-        self.lbl_ram_val = QLabel("0 / 0 GB")
-        self.lbl_ram_val.setStyleSheet("font-size: 16px; font-weight: bold; color: #ff00ff;")
-        self.prog_ram = QProgressBar()
-        self.prog_ram.setTextVisible(False)
-        self.prog_ram.setStyleSheet("QProgressBar::chunk { background-color: #ff00ff; }")
-        ram_l.addWidget(self.lbl_ram_val, 0, Qt.AlignmentFlag.AlignCenter)
-        ram_l.addWidget(self.prog_ram)
-        health_metrics.addWidget(ram_grp)
-        
-        # Disk Widget (Dynamic)
-        disk_grp = QGroupBox("Disk Status")
-        self.disk_layout = QVBoxLayout(disk_grp)
-        health_metrics.addWidget(disk_grp)
-        
-        h_layout.addLayout(health_metrics)
-        
-        # 2. Scorecard Grid (Heuristics)
-        h_layout.addWidget(self.create_header("Detailed Scorecard", "System health heuristic analysis."))
-        
-        score_grid = QGridLayout()
-        score_grid.setSpacing(15)
-        
-        # Define cards (Title, ID)
-        self.health_cards = {} 
-        
-        cards = [
-            ("Hardware Age", "hw_card"),
-            ("OS Freshness", "os_card"),
-            ("Vuln Density", "vuln_card"),
-            ("Persistence Rate", "pers_card"),
-            ("Stale Users", "user_card"),
-            ("Driver Compliance", "drv_card")
-        ]
-        
-        for i, (title, key) in enumerate(cards):
-            card = QFrame()
-            card.setStyleSheet("""
-                QFrame {
-                    background-color: #333333;
-                    border-radius: 8px;
-                    border: 1px solid #444;
-                }
-            """)
-            c_layout = QVBoxLayout(card)
-            
-            lbl_title = QLabel(title)
-            lbl_title.setStyleSheet("color: #aaaaaa; font-size: 12px; border: none;")
-            
-            lbl_val = QLabel("--")
-            lbl_val.setStyleSheet("color: white; font-size: 18px; font-weight: bold; border: none;")
-            
-            lbl_status = QLabel("Unknown")
-            lbl_status.setStyleSheet("color: #888; font-size: 10px; border: none;")
-            
-            c_layout.addWidget(lbl_title)
-            c_layout.addWidget(lbl_val)
-            c_layout.addWidget(lbl_status)
-            
-            self.health_cards[key] = (lbl_val, lbl_status, card)
-            
-            row = i // 3
-            col = i % 3
-            score_grid.addWidget(card, row, col)
-            
-        h_layout.addLayout(score_grid)
-        
-        # 2. Split Tables (Security Center vs Crashes)
-        h_layout.addWidget(self.create_header("System Events", "Security services and stability events."))
-        
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        
-        # Left: Security Center
-        sec_widget = QWidget()
-        sec_l = QVBoxLayout(sec_widget)
-        sec_l.setContentsMargins(0, 0, 0, 0)
-        sec_l.addWidget(QLabel("<b>Security Center</b>"))
-        self.sec_table = QTableView()
-        self.configure_table(self.sec_table)
-        self.sec_model = GenericTableModel(["Service", "Status", "State"])
-        self.sec_table.setModel(self.sec_model)
-        self.sec_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        sec_l.addWidget(self.sec_table)
-        splitter.addWidget(sec_widget)
-        
-        # Right: Crashes
-        crash_widget = QWidget()
-        crash_l = QVBoxLayout(crash_widget)
-        crash_l.setContentsMargins(0, 0, 0, 0)
-        crash_l.addWidget(QLabel("<b>Recent Crashes</b>"))
-        self.crash_table = QTableView()
-        self.configure_table(self.crash_table)
-        self.crash_model = GenericTableModel(["Module", "Path", "Type", "Time"])
-        self.crash_table.setModel(self.crash_model)
-        self.crash_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        crash_l.addWidget(self.crash_table)
-        splitter.addWidget(crash_widget)
-        
-        splitter.setSizes([500, 500])
-        h_layout.addWidget(splitter)
-        
-        sub_tabs.addTab(health_tab, "Health")
-        
-        # --- UPDATES ---
-        upd_tab = QWidget()
-        u_layout = QVBoxLayout(upd_tab)
-        u_layout.addWidget(self.create_header("Windows Updates", "Recent system patches and hotfixes."))
-        
-        u_ctrl = QHBoxLayout()
-        btn_scan_upd = QPushButton("🔄 Scan Updates")
-        btn_scan_upd.clicked.connect(lambda: self.run_partial_scan(['updates']))
-        u_ctrl.addWidget(btn_scan_upd)
-        u_ctrl.addStretch()
-        u_layout.addLayout(u_ctrl)
-        
-        self.upd_table = QTableView()
-        self.configure_table(self.upd_table)
-        self.upd_model = GenericTableModel(["Hotfix ID", "Description", "Installed On", "By"])
-        self.upd_table.setModel(self.upd_model)
-        self.upd_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        u_layout.addWidget(self.upd_table)
-        sub_tabs.addTab(upd_tab, "Updates")
-        
-        # --- PERSISTENCE ---
-        pers_tab = QWidget()
-        p_layout = QVBoxLayout(pers_tab)
-        p_layout.addWidget(self.create_header("Persistence Mechanisms", "Startup items and scheduled tasks."))
-        
-        p_ctrl = QHBoxLayout()
-        btn_scan_pers = QPushButton("🔄 Scan Startup")
-        btn_scan_pers.clicked.connect(lambda: self.run_partial_scan(['startup']))
-        p_ctrl.addWidget(btn_scan_pers)
-        p_ctrl.addStretch()
-        p_layout.addLayout(p_ctrl)
-        
-        self.startup_table = QTableView()
-        self.configure_table(self.startup_table)
-        self.startup_model = GenericTableModel(["Name", "Path", "Location"])
-        self.startup_table.setModel(self.startup_model)
-        self.startup_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        p_layout.addWidget(self.startup_table)
-        sub_tabs.addTab(pers_tab, "Persistence")
+        self.main_tabs.addTab(tab, "System & Scans")
 
-        # --- VULNERABILITIES ---
-        vuln_tab = QWidget()
-        v_layout = QVBoxLayout(vuln_tab)
-        v_layout.addWidget(self.create_header("Software Vulnerabilities", "CVEs detected in installed applications."))
-        
-        # Bulk Actions
-        self.btn_vuln_term, self.btn_vuln_ai, self.btn_vuln_vt = self.create_toolbar(v_layout)
-        self.btn_vuln_term.hide() 
-        self.btn_vuln_vt.hide() 
-        self.btn_vuln_ai.clicked.connect(lambda: self.run_bulk_action("ai", self.vuln_model, "cve"))
-        
-        self.vuln_table = QTableView()
-        self.configure_table(self.vuln_table)
-        self.vuln_model = GenericTableModel(["", "Software", "CVE ID", "Description", "Confidence", "Status"])
-        self.vuln_table.setModel(self.vuln_model)
-        
-        # Checkable Header
-        self.vuln_header = CheckableHeaderView(Qt.Orientation.Horizontal, self.vuln_table)
-        self.vuln_table.setHorizontalHeader(self.vuln_header)
-        # Toggle All logic
-        self.vuln_header.toggled.connect(lambda c: [self.vuln_model.item(r,0).setCheckState(Qt.CheckState.Checked if c else Qt.CheckState.Unchecked) for r in range(self.vuln_model.rowCount())])
-        # Update toolbar logic
-        self.vuln_model.itemChanged.connect(lambda item: self.update_toolbar_state(self.vuln_model, [self.btn_vuln_ai]))
-
-        self.vuln_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.vuln_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.vuln_table.setColumnWidth(0, 30)
-        self.vuln_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        
-        self.vuln_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.vuln_table.customContextMenuRequested.connect(lambda pos: self.show_context_menu(pos, self.vuln_table, "cve"))
-        v_layout.addWidget(self.vuln_table)
-        sub_tabs.addTab(vuln_tab, "Vulnerabilities")
-        
-        self.main_tabs.addTab(tab, "System")
-
-    def init_config_tab(self):
-        """Builds the 'Configuration' tab."""
+    def init_logs_tab(self):
+        """Console Output View."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        sub_tabs = QTabWidget()
-        layout.addWidget(sub_tabs)
         
-        set_tab = QWidget()
-        form_layout = QFormLayout(set_tab)
-        lbl = QLabel("API Configuration")
-        lbl.setStyleSheet("font-size: 16px; font-weight: bold; margin-bottom: 10px;")
-        form_layout.addRow(lbl)
-        self.api_nist = QLineEdit()
-        self.api_gemini = QLineEdit()
-        self.api_nist.setEchoMode(QLineEdit.EchoMode.Password) # Mask input
-        self.api_gemini.setEchoMode(QLineEdit.EchoMode.Password)
-        
-        form_layout.addRow("NIST API Key:", self.api_nist)
-        form_layout.addRow("Gemini API Key:", self.api_gemini)
-        
-        self.chk_safe_mode = QCheckBox("Safe Mode (Skip startup scans)")
-        self.chk_safe_mode.setToolTip("If enabled, the application will load cached data immediately on startup searching for hardware.")
-        form_layout.addRow(self.chk_safe_mode)
-        
-        btn_save = QPushButton("Save Configuration")
-        btn_save.clicked.connect(self.save_api_keys)
-        form_layout.addRow(btn_save)
-        sub_tabs.addTab(set_tab, "Settings")
-        
-        log_tab = QWidget()
-        l_layout = QVBoxLayout(log_tab)
         self.log_viewer = QTextEdit()
         self.log_viewer.setReadOnly(True)
-        l_layout.addWidget(self.log_viewer)
-        sub_tabs.addTab(log_tab, "Logs")
+        layout.addWidget(self.log_viewer)
         
-        self.main_tabs.addTab(tab, "Configuration")
+        self.main_tabs.addTab(tab, "Logs")
 
-    # --- UI HELPERS ---
+    # ---------------------------------------------------------
+    # UTILITY METHODS (Helpers)
+    # ---------------------------------------------------------
+    
+    def create_header(self, title, subtitle):
+        """Factory for standardized section headers."""
+        w = QWidget()
+        l = QVBoxLayout(w)
+        l.setContentsMargins(0, 0, 0, 10)
+        t = QLabel(title)
+        t.setObjectName("Header")
+        s = QLabel(subtitle)
+        s.setStyleSheet("color: #888; margin-bottom: 5px;")
+        l.addWidget(t)
+        l.addWidget(s)
+        return w
 
-    def create_kpi_card(self, title, icon, color="#007acc"):
-        """Creates a standardized KPI card widget."""
+    def create_kpi_card(self, title, icon, callback):
+        """Factory for Dashboard Cards."""
         card = QFrame()
-        card.setStyleSheet(f"""
-            QFrame {{
-                background-color: #2d2d2d;
-                border-left: 4px solid {color};
-                border-radius: 4px;
-            }}
-            QLabel {{ border: none; background: transparent; }}
-        """)
-        card.setFrameShape(QFrame.Shape.StyledPanel)
+        card.setStyleSheet("QFrame { background: #2d2d2d; border: 1px solid #444; border-radius: 6px; }")
+        l = QVBoxLayout(card)
         
-        layout = QVBoxLayout(card)
+        lbl_icon = QLabel(icon)
+        lbl_icon.setStyleSheet("font-size: 24px; border: none;")
+        l.addWidget(lbl_icon, 0, Qt.AlignmentFlag.AlignCenter)
         
-        # Header
-        h_layout = QHBoxLayout()
-        l_icon = QLabel(icon)
-        l_icon.setFont(QFont("Segoe UI Emoji", 18))
-        l_title = QLabel(title)
-        l_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #cccccc;")
-        h_layout.addWidget(l_icon)
-        h_layout.addWidget(l_title)
-        h_layout.addStretch()
-        layout.addLayout(h_layout)
+        lbl_title = QLabel(title)
+        lbl_title.setStyleSheet("font-weight: bold; border: none;")
+        l.addWidget(lbl_title, 0, Qt.AlignmentFlag.AlignCenter)
         
-        # Value
-        l_val = QLabel("Loading...")
-        l_val.setStyleSheet("font-size: 24px; font-weight: bold; color: white; margin: 5px 0;")
-        l_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(l_val)
-        
-        # Description
-        l_desc = QLabel("Waiting for data...")
-        l_desc.setStyleSheet("color: #888888; font-size: 11px;")
-        l_desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        l_desc.setWordWrap(True)
-        layout.addWidget(l_desc)
-        
-        # Scan Button (Hidden by default)
-        btn = QPushButton("Scan Now")
-        btn.setStyleSheet("""
-            QPushButton {
-                background-color: #333333;
-                border: 1px solid #555555;
-                font-size: 10px;
-                padding: 4px;
-            }
-            QPushButton:hover { background-color: #444444; }
-        """)
-        btn.hide()
-        layout.addWidget(btn)
-        
-        # Store references for updates
-        card.lbl_val = l_val
-        card.lbl_desc = l_desc
-        card.btn_scan = btn
+        btn = QPushButton("Scan")
+        btn.clicked.connect(callback)
+        l.addWidget(btn)
         
         return card
 
-    def create_header(self, title, desc):
-        """Creates a consistent header block (Title + Subtitle)."""
-        container = QWidget()
-        lay = QVBoxLayout(container)
-        lay.setContentsMargins(0,0,0,0)
-        l_title = QLabel(title)
-        l_title.setObjectName("Header")
-        l_desc = QLabel(desc)
-        l_desc.setObjectName("Desc")
-        lay.addWidget(l_title)
-        lay.addWidget(l_desc)
-        return container
-        
-    def create_toolbar(self, layout):
-        """Creates a standardized action toolbar."""
-        toolbar = QHBoxLayout()
-        btn_terminate = QPushButton("Terminate Process")
-        btn_ai = QPushButton("AI Analysis")
-        btn_vt = QPushButton("VirusTotal Scan")
-        
-        btn_terminate.setEnabled(False)
-        btn_ai.setEnabled(False)
-        btn_vt.setEnabled(False)
-        
-        # Style
-        btn_terminate.setStyleSheet("background-color: #8B0000;") # Dark Red
+    def configure_table(self, table):
+        """Applies standard aesthetic grouping to tables."""
+        table.setAlternatingRowColors(True)
+        table.verticalHeader().setVisible(False)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
 
-        toolbar.addWidget(btn_terminate)
-        toolbar.addWidget(btn_ai)
-        toolbar.addWidget(btn_vt)
-        toolbar.addStretch()
-        
-        layout.addLayout(toolbar)
-        return btn_terminate, btn_ai, btn_vt
+    def append_log(self, msg):
+        self.log_viewer.append(msg)
 
     # ---------------------------------------------------------
-    # CORE LOGIC & SLOTS (Controller)
+    # LOGIC & EVENT HANDLERS
     # ---------------------------------------------------------
 
-    def load_api_keys(self):
-        """Loads API keys from secure storage on startup."""
-        config = ConfigManager.load_config()
-        self.api_nist.setText(config.get("nist_api_key", ""))
-        self.api_gemini.setText(config.get("gemini_api_key", ""))
-        self.chk_safe_mode.setChecked(config.get("safe_mode", "false").lower() == "true")
-        logging.info("Configuration loaded.")
+    def update_process_view(self, processes: List[Dict]):
+        """Slot: Called by ProcessWorker every 5s."""
+        self.proc_model.removeRows(0, self.proc_model.rowCount())
+        for p in processes:
+            row = [
+                QStandardItem(str(p['pid'])),
+                QStandardItem(p['name']),
+                QStandardItem(p.get('exe', '')),
+                QStandardItem(f"{p['memory_info'].rss / 1024 / 1024:.1f} MB"),
+                QStandardItem(p['username'])
+            ]
+            self.proc_model.appendRow(row)
 
-    def save_api_keys(self):
-        """Saves API keys to secure storage."""
-        data = {
-            "nist_api_key": self.api_nist.text(),
-            "gemini_api_key": self.api_gemini.text(),
-            "safe_mode": "true" if self.chk_safe_mode.isChecked() else "false"
-        }
-        ConfigManager.save_config(data)
-        logging.info("Configuration saved successfully.")
-        self.status_bar.showMessage("Settings Saved")
-
-    # --- Scanning Logic ---
-
-    def run_partial_scan(self, categories):
-        """
-        Starts a background scan for specific categories.
-        Args:
-            categories (list): e.g., ['software', 'network'] or ['all']
-        """
-        cat_str = ", ".join(categories) if categories else "All"
-        logging.info(f"Starting Scan: {cat_str}")
-        self.status_bar.showMessage(f"Scanning: {cat_str}...")
-        
-        # Show indeterminate progress bar (marquee style)
-        self.scan_progress.show()
-        self.scan_progress.setRange(0, 0) 
-        
-        # Instantiate Worker
-        # Note: We must keep a reference (self.scan_worker) so it's not garbage collected.
-        self.scan_worker = ScanWorker(scan_categories=categories)
-        self.scan_worker.progress.connect(self.update_scan_status)
-        self.scan_worker.finished.connect(self.on_scan_finished)
-        self.scan_worker.start()
-
-    def update_scan_status(self, msg):
-        """Slot: Updates status bar with current scan step."""
-        self.status_bar.showMessage(msg)
-        logging.info(f"Scan Progress: {msg}")
-
-    def on_scan_finished(self):
-        """Slot: Called when ScanWorker finishes."""
-        self.scan_progress.hide()
-        self.status_bar.showMessage("Scan Complete")
-        logging.info("Scan Finished.")
-        
-        # Reload ALL data from DB to ensure UI is up to date
-        self.refresh_dashboard_data()
-        
-        if hasattr(self, 'btn_scan'): 
-            self.btn_scan.setEnabled(True)
-
-    # --- Threat Intel Logic ---
+    def refresh_dashboard_data(self):
+        """Loads generic data from DB to UI."""
+        # Intel Feed Logic
+        rows = self.db.execute_query("SELECT severity, products, title, pub_date FROM advisories ORDER BY pub_date DESC LIMIT 50")
+        self.intel_model.removeRows(0, self.intel_model.rowCount())
+        for r in rows:
+            # Color coding severity
+            sev_item = QStandardItem(str(r[0]))
+            if r[0] >= 9.0: sev_item.setForeground(QBrush(QColor("#ff4444"))) # Critical
+            elif r[0] >= 7.0: sev_item.setForeground(QBrush(QColor("#ffaa00"))) # High
+            
+            self.intel_model.appendRow([
+                sev_item,
+                QStandardItem(r[1][:50] + "..."),
+                QStandardItem(r[2]),
+                QStandardItem(str(r[3]))
+            ])
 
     def refresh_threat_feed(self):
-        """Starts background fetch of new advisories."""
-        logging.info("Refreshing Threat Intel Feed (Reset)...")
-        self.feed_offset = 0
-        self.adv_worker = AdvisoryWorker(start_index=0, limit=50)
-        self.adv_worker.progress.connect(self.update_scan_status)
-        self.adv_worker.finished.connect(self.on_threat_feed_finished)
-        self.adv_worker.start()
+        """Trigger Background Worker."""
+        self.worker = AdvisoryWorker()
+        self.worker.progress.connect(lambda s: self.status_bar.showMessage(s))
+        self.worker.finished.connect(lambda: [self.refresh_dashboard_data(), self.status_bar.showMessage("Feed Updated.")])
+        self.worker.start()
 
-    def fetch_more_intel(self):
-        """Pagination: Fetches older advisories."""
-        self.feed_offset += 50
-        logging.info(f"Fetching More Intel (Offset {self.feed_offset})...")
-        self.status_bar.showMessage(f"Fetching older advisories (Offset {self.feed_offset})...")
-        
-        self.adv_worker = AdvisoryWorker(start_index=self.feed_offset, limit=50)
-        self.adv_worker.progress.connect(self.update_scan_status)
-        self.adv_worker.finished.connect(self.on_threat_feed_finished)
-        self.adv_worker.start()
+    def handle_fim_alert(self, data: Dict):
+        """Slot: Real-time FIM alert."""
+        msg = f"FIM ALERT: {data['file_path']} ({data['action_type']})"
+        logging.warning(msg)
+        self.status_bar.showMessage(msg, 5000) # Show for 5s
 
-    def on_threat_feed_finished(self):
-        self.status_bar.showMessage("Feed Updated")
-        self.refresh_dashboard_data() # Reload table
-
-    # --- Process Monitor Logic ---
-
-    def toggle_process_monitor(self, state):
-        """Starts/Stops the background process polling thread."""
-        if state == 2: # Checked
-            logging.info("Starting Process Monitor...")
-            self.proc_worker.start()
-        else: # Unchecked
-            logging.info("Stopping Process Monitor...")
-            self.proc_worker.stop()
-
-    def update_process_view(self, data):
-        """
-        Slot: Updates the process list table.
-        This runs on the Main Thread, so it's safe to touch UI widgets.
-        """
-        # We rebuild the list. For a production app, we would use a diff algorithm
-        # to update only changed rows (for performance and selection preservation).
-        self.proc_model.setRowCount(0)
-        
-        for p in data:
-            item_chk = QStandardItem("")
-            item_chk.setCheckable(True)
-            
-            pid = str(p.get('pid', ''))
-            name = str(p.get('name', ''))
-            path = str(p.get('path', '')) or ""
-            mem = f"{p.get('memory', 0.0):.1f}"
-            cpu = f"{p.get('cpu', 0.0):.1f}"
-            user = str(p.get('username', ''))
-            
-            items = [
-                item_chk,
-                QStandardItem(pid),
-                QStandardItem(name),
-                QStandardItem(path),
-                QStandardItem(mem),
-                QStandardItem(cpu),
-                QStandardItem(user)
-            ]
-            
-            # Highlight high CPU usage
-            if float(cpu) > 50.0:
-                 items[5].setForeground(QBrush(QColor("#ff4444"))) # Red
-                 
-            self.proc_model.appendRow(items)
-            
-    def toggle_all_processes(self, checked):
-        """Selects/Deselects all rows."""
-        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
-        for row in range(self.proc_model.rowCount()):
-             self.proc_model.item(row, 0).setCheckState(state)
-
-    def update_toolbar_state(self, model, buttons):
-        """Enables/Disables toolbar buttons based on selection."""
-        has_checked = False
-        for row in range(model.rowCount()):
-            if model.item(row, 0).checkState() == Qt.CheckState.Checked:
-                has_checked = True
-                break
-        
-        for btn in buttons:
-            btn.setEnabled(has_checked)
-
-    # --- Data Loaders (View Populators) ---
+    # --- Scanning Wrappers ---
     
-    def refresh_dashboard_data(self):
-        """
-        Orchestrates reloading all UI data from the Database.
-        Called after scans finish.
-        """
-        logging.info("Refeshing Dashboard UI...")
-        try:
-            # Reload Tables
-            self.load_table_software()
-            self.load_table_exposure()
-            self.load_table_risk()
-            self.load_table_certs()
-            self.load_table_startup()
-            self.load_table_network()
-            self.load_table_identity()
-            self.load_table_intel()
-            self.load_table_drivers()
-            self.load_table_extensions()
-            self.load_table_health()
-            self.load_table_updates()
-            self.load_table_vulns()
-            self.load_fim_alerts()
-            
-            # Update KPI Cards text
-            self.update_kpi_cards()
-            
-            logging.info("UI Refresh Complete.")
-        except Exception as e:
-            logging.error(f"Error refreshing dashboard: {e}", exc_info=True)
+    def run_scan(self, categories):
+        """Generic Scan Launcher."""
+        self.scan_worker = ScanWorker(scan_categories=categories)
+        self.scan_worker.progress.connect(lambda s: self.status_bar.showMessage(s))
+        self.scan_worker.finished.connect(lambda: [self.refresh_dashboard_data(), self.status_bar.showMessage("Scan Complete.")])
+        self.scan_worker.start()
 
-    def load_table_software(self):
-        # Query DB directly for fast display
-        rows = self.db.execute_query("SELECT name, version, publisher, install_date FROM installed_software")
-        self.inv_model.setRowCount(0)
-        for row in rows:
-            self.inv_model.appendRow([QStandardItem(str(f)) for f in row])
+    def scan_software(self): self.run_scan(['software'])
+    def scan_network(self): self.run_scan(['network'])
+    def scan_identity(self): self.run_scan(['identity'])
+    def scan_full(self): self.run_scan(['all'])
 
-    def load_table_exposure(self):
-        rows = self.db.execute_query("SELECT port, protocol, process_name, username, binary_path FROM exposed_services")
-        self.exposure_model.setRowCount(0)
-        for row in rows:
-            self.exposure_model.appendRow([QStandardItem(str(f)) for f in row])
-        
-    def load_table_risk(self):
-        rows = self.db.execute_query("SELECT port, protocol, process_name, risk_score FROM exposed_services ORDER BY risk_score DESC")
-        self.risk_model.setRowCount(0)
-        for row in rows:
-            items = [QStandardItem(str(f)) for f in row]
-            # Highlight High Risk (>60)
-            if row[3] and int(row[3]) > 60:
-                for item in items:
-                    item.setForeground(QBrush(QColor("#ff4444")))
-            self.risk_model.appendRow(items)
-
-    def load_table_certs(self):
-        rows = self.db.execute_query("SELECT subject, issuer, expiry_date, is_root FROM certificates")
-        self.cert_model.setRowCount(0)
-        for row in rows:
-                self.cert_model.appendRow([QStandardItem(str(f)) for f in row])
-
-    def load_table_startup(self):
-        rows = self.db.execute_query("SELECT name, path, location FROM startup_items")
-        self.startup_model.setRowCount(0)
-        for row in rows:
-            self.startup_model.appendRow([QStandardItem(str(f)) for f in row])
-
-    def load_table_network(self):
-        rows = self.db.execute_query("SELECT pid, local_addr, remote_addr, state, protocol FROM telemetry_network LIMIT 200")
-        self.net_model.setRowCount(0)
-        for row in rows:
-            self.net_model.appendRow([QStandardItem(str(f)) for f in row])
-        
-        # Also Hosts
-        h_rows = self.db.execute_query("SELECT hostnames, ip_address FROM telemetry_hosts")
-        self.hosts_model.setRowCount(0)
-        for row in h_rows:
-             self.hosts_model.appendRow([QStandardItem(str(f)) for f in row])
-
-    def load_table_identity(self):
-        rows = self.db.execute_query("SELECT username, uid, description, last_login FROM user_accounts")
-        self.user_model.setRowCount(0)
-        for row in rows:
-            self.user_model.appendRow([QStandardItem(str(f)) for f in row])
-
-    def load_table_intel(self):
-        rows = self.db.execute_query("SELECT pub_date, severity, title, impact, cve_ids, description FROM advisories ORDER BY pub_date DESC")
-        self.intel_model.setRowCount(0)
-        for row in rows:
-            date_str = str(row[0]).split(' ')[0]
-            severity = float(row[1]) if row[1] else 0.0
-            items = [
-                QStandardItem(date_str),
-                QStandardItem(str(severity)),
-                QStandardItem(str(row[2])),
-                QStandardItem(str(row[3])),
-                QStandardItem(str(row[4]))
-            ]
-            # Store full description in UserRole for context menus
-            items[0].setData(row[5], Qt.ItemDataRole.UserRole)
-            
-            # Color coding for severity
-            if severity >= 7.0:
-                color = "#ff4444" if severity >= 9.0 else "#ff8800"
-                for item in items: item.setForeground(QBrush(QColor(color)))
-            self.intel_model.appendRow(items)
-
-    def load_table_drivers(self):
-        rows = self.db.execute_query("SELECT name, description, provider, status, signed FROM telemetry_drivers")
-        self.drv_model.setRowCount(0)
-        for row in rows:
-            self.drv_model.appendRow([QStandardItem(str(f)) for f in row])
-
-    def load_table_extensions(self):
-        rows = self.db.execute_query("SELECT name, browser, version, identifier, status FROM telemetry_browser_extensions")
-        self.ext_model.setRowCount(0)
-        for row in rows:
-            self.ext_model.appendRow([QStandardItem(str(f)) for f in row])
-
-    def load_table_health(self):
-        try:
-            # 1. System Metrics
-            health = self.inv_mgr.get_system_health()
-            
-            # CPU
-            cpu_p = health['cpu'].get('percent', 0)
-            self.lbl_cpu_val.setText(f"{cpu_p}%")
-            self.prog_cpu.setValue(int(cpu_p))
-            
-            # RAM
-            ram = health['ram']
-            total_gb = ram.get('total', 0) / (1024**3)
-            used_gb = (ram.get('total', 0) - ram.get('available', 0)) / (1024**3)
-            self.lbl_ram_val.setText(f"{used_gb:.1f} / {total_gb:.1f} GB")
-            self.prog_ram.setValue(int(ram.get('percent', 0)))
-            
-            # Disk
-            while self.disk_layout.count():
-                item = self.disk_layout.takeAt(0)
-                if item.widget(): item.widget().deleteLater()
-            
-            for d in health.get('disk', []):
-                d_widget = QWidget()
-                d_l = QHBoxLayout(d_widget)
-                d_l.setContentsMargins(0, 0, 0, 0)
-                d_lbl = QLabel(f"{d['device']} ({d['percent']}%)")
-                d_lbl.setStyleSheet("color: white;")
-                d_prog = QProgressBar()
-                d_prog.setFixedHeight(10)
-                d_prog.setTextVisible(False)
-                d_prog.setValue(int(d['percent']))
-                d_prog.setStyleSheet("QProgressBar::chunk { background-color: #00ff00; }")
-                if d['percent'] > 80:
-                    d_prog.setStyleSheet("QProgressBar::chunk { background-color: #ff4444; }")
-                d_l.addWidget(d_lbl)
-                d_l.addWidget(d_prog)
-                self.disk_layout.addWidget(d_widget)
-            
-            # 2. Heuristic Scorecard
-            self.update_scorecard()
-            
-            # 3. Security Center Table
-            sec_rows = self.db.execute_query("SELECT service, status, state FROM telemetry_security_center")
-            self.sec_model.setRowCount(0)
-            for row in sec_rows:
-                self.sec_model.appendRow([QStandardItem(str(f)) for f in row])
-
-            # 4. Crashes Table
-            crash_rows = self.db.execute_query("SELECT module, path, type, crash_time FROM telemetry_crashes ORDER BY crash_time DESC LIMIT 50")
-            self.crash_model.setRowCount(0)
-            for row in crash_rows:
-                self.crash_model.appendRow([QStandardItem(str(f)) for f in row])
-                
-        except Exception as e:
-            logging.error(f"Error loading health data: {e}")
-
-    def update_scorecard(self):
-        """Calculates security grades based on various metrics."""
-        try:
-            def set_card(key, value, text, color="#00ff00"):
-                if key in self.health_cards:
-                    lbl_val, lbl_stat, card = self.health_cards[key]
-                    lbl_val.setText(str(value))
-                    lbl_stat.setText(text)
-                    lbl_stat.setStyleSheet(f"color: {color}; font-size: 10px; border: none;")
-                    card.setStyleSheet(f"background-color: #333333; border: 1px solid {color}; border-radius: 8px;")
-
-            # Hardware Age
-            hw = int(self.db.get_metadata("hw_age_days") or -1)
-            if hw == -1: set_card("hw_card", "N/A", "Unknown", "#888")
-            else:
-                 color = "#00ff00" if hw < 1095 else ("#ff8800" if hw < 1825 else "#ff4444")
-                 status = "Good" if hw < 1095 else ("Aging" if hw < 1825 else "End of Life")
-                 set_card("hw_card", f"{hw} Days", status, color)
-
-            # OS Freshness
-            os_days = int(self.db.get_metadata("os_freshness_days") or -1)
-            if os_days == -1: set_card("os_card", "N/A", "Unknown", "#888")
-            else:
-                 color = "#00ff00" if os_days < 730 else "#ff8800"
-                 status = "Fresh" if os_days < 730 else "Consider Update"
-                 set_card("os_card", f"{os_days} Days", status, color)
-
-            # Vuln Density
-            vd = float(self.db.get_metadata("vuln_density") or 0)
-            color = "#ff4444" if vd > 20 else ("#ff8800" if vd > 10 else "#00ff00")
-            set_card("vuln_card", f"{vd:.1f}%", "Vuln/App Ratio", color)
-
-            # Persistence
-            pd = float(self.db.get_metadata("persistence_density") or 0)
-            color = "#ff4444" if pd > 15 else ("#ff8800" if pd > 8 else "#00ff00")
-            set_card("pers_card", f"{pd:.1f}%", "Startup/Proc Ratio", color)
-            
-            # Stale Users
-            su = int(self.db.get_metadata("stale_user_count") or 0)
-            color = "#ff4444" if su > 2 else ("#ff8800" if su > 0 else "#00ff00")
-            set_card("user_card", str(su), "Inactive > 90d", color)
-            
-            # Driver Compliance
-            ud = int(self.db.get_metadata("unsigned_drivers") or 0)
-            color = "#ff4444" if ud > 0 else "#00ff00"
-            set_card("drv_card", str(ud), "Unsigned Drivers", color)
-            
-        except Exception as e:
-            logging.error(f"Scorecard Error: {e}")
-
-    def load_table_updates(self):
-        rows = self.db.execute_query("SELECT hotfix_id, description, installed_on, installed_by FROM telemetry_windows_updates")
-        self.upd_model.setRowCount(0)
-        for row in rows:
-             self.upd_model.appendRow([QStandardItem(str(f)) for f in row])
-             
-    def load_table_vulns(self):
-         rows = self.db.execute_query("""
-            SELECT s.name, m.cve_id, 'Description Unavailable', m.confidence, m.status 
-            FROM vulnerability_matches m
-            JOIN installed_software s ON m.software_id = s.id
-         """)
-         self.vuln_model.setRowCount(0)
-         for row in rows:
-             item_chk = QStandardItem("")
-             item_chk.setCheckable(True)
-             parts = [item_chk] + [QStandardItem(str(f)) for f in row]
-             self.vuln_model.appendRow(parts)
-
-    def load_fim_alerts(self):
-        # We limit to last 50
-        rows = self.db.execute_query("SELECT timestamp, file_path, action_type, severity FROM telemetry_fim_alerts ORDER BY id DESC LIMIT 50")
-        self.fim_model.setRowCount(0)
-        for row in rows:
-            self.fim_model.appendRow([QStandardItem(str(f)) for f in row])
-
-    def update_kpi_cards(self):
-        """Updates the top-row widgets with fresh counts."""
-        # Assets
-        app_count = self.db.execute_query("SELECT count(*) FROM installed_software")[0][0] or 0
-        if app_count == 0:
-            self.kpi_assets.lbl_val.setText("No Data")
-            self.kpi_assets.btn_scan.show()
-        else:
-             self.kpi_assets.lbl_val.setText(f"{app_count} Apps")
-             self.kpi_assets.btn_scan.hide()
-
-        # Network
-        port_count = self.db.execute_query("SELECT count(*) FROM exposed_services")[0][0] or 0
-        conn_count = self.db.execute_query("SELECT count(*) FROM telemetry_network")[0][0] or 0
-        if port_count == 0:
-            self.kpi_network.lbl_val.setText("No Data")
-            self.kpi_network.btn_scan.show()
-        else:
-            self.kpi_network.lbl_val.setText(f"{port_count} Ports / {conn_count} Conns")
-            self.kpi_network.btn_scan.hide()
-
-        # Identity
-        user_count = self.db.execute_query("SELECT count(*) FROM user_accounts")[0][0] or 0
-        self.kpi_identity.lbl_val.setText(f"{user_count} Users" if user_count else "No Data")
-        if user_count == 0: self.kpi_identity.btn_scan.show()
-        else: self.kpi_identity.btn_scan.hide()
-        
-        # Health (Crashes)
-        crash_count = self.db.execute_query("SELECT count(*) FROM telemetry_crashes")[0][0] or 0
-        self.kpi_health.lbl_val.setText("Good" if crash_count == 0 else f"{crash_count} Crashes")
-        
-        # Vulns
-        vuln_count = self.db.execute_query("SELECT count(*) FROM vulnerability_matches WHERE status='Detected'")[0][0] or 0
-        self.kpi_vulns.lbl_val.setText("Safe" if vuln_count == 0 else f"{vuln_count} CVEs")
-
-    def handle_fim_alert(self, data):
-        """Slot: Called when FIMWorker detects a file change."""
-        try:
-             # Insert into local model instantly (DB insert handled by Worker or here?)
-             # In our architecture, Manager/Worker handles DB I/O. 
-             # But here we just update UI.
-             
-             items = [
-                QStandardItem(data['timestamp']),
-                QStandardItem(data['file_path']),
-                QStandardItem(data['action_type']),
-                QStandardItem(data['severity'])
-             ]
-             self.fim_model.insertRow(0, items)
-             if self.fim_model.rowCount() > 50:
-                 self.fim_model.removeRow(50)
-        except Exception: pass
-
-    # --- Malware Scanner ---
+    # --- Actions ---
     
-    def browse_scan_path(self):
-        path = QFileDialog.getExistingDirectory(self, "Select Directory to Scan")
-        if path:
-            self.txt_scan_path.setText(path)
+    def kill_selected_process(self):
+        """Kills the process selected in the table."""
+        idx = self.proc_table.currentIndex()
+        if not idx.isValid(): return
+        
+        # PID is in column 0
+        pid_item = self.proc_model.item(idx.row(), 0)
+        try:
+            pid = int(pid_item.text())
+            logging.info(f"Attempting to kill PID {pid}...")
+            psutil.Process(pid).terminate()
+            QMessageBox.information(self, "Success", f"Process {pid} terminated.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to kill process: {e}")
 
-    def start_yara_scan(self):
-        path = self.txt_scan_path.text()
-        if not path: return
+    def ai_analyze_process(self):
+        """Sends process metadata to AI Worker."""
+        idx = self.proc_table.currentIndex()
+        if not idx.isValid(): return
         
-        self.btn_yara_scan.setEnabled(False)
-        self.mal_model.setRowCount(0)
-        self.lbl_scan_status.setText("Scanning...")
+        name = self.proc_model.item(idx.row(), 1).text()
+        context = f"Analyze executeable: {name}. Is it normally safe?"
         
+        self.status_bar.showMessage(f"Asking Gemini AI about {name}...")
+        self.ai_worker = AIWorker(context)
+        self.ai_worker.result.connect(lambda res: QMessageBox.information(self, "AI Analysis", res))
+        self.ai_worker.start()
+
+    def start_manual_scan(self):
+        """Starts YARA scan on target path."""
+        path = self.txt_scan_target.text()
+        if not path or not os.path.exists(path):
+            QMessageBox.warning(self, "Invalid Path", "Please select a valid file or directory.")
+            return
+            
         self.yara_worker = YaraScanWorker(path)
-        self.yara_worker.progress.connect(lambda msg: self.lbl_scan_status.setText(msg))
-        self.yara_worker.result.connect(self.on_yara_result)
-        self.yara_worker.finished.connect(self.on_yara_finished)
+        self.yara_worker.progress.connect(lambda s: self.status_bar.showMessage(s))
+        self.yara_worker.result.connect(self.display_scan_results)
         self.yara_worker.start()
 
-    def on_yara_result(self, matches):
+    def display_scan_results(self, matches):
+        self.mal_model.removeRows(0, self.mal_model.rowCount())
+        if not matches:
+            QMessageBox.information(self, "Clean", "No malware signatures detected.")
+            return
+        
         for m in matches:
-             self.mal_model.appendRow([
-                 QStandardItem(m['file']),
-                 QStandardItem(m['rule']),
-                 QStandardItem(str(m['tags'])),
-                 QStandardItem(str(m['meta']))
-             ])
-    
-    def on_yara_finished(self):
-        self.lbl_scan_status.setText(f"Scan Finished. Matches: {self.mal_model.rowCount()}")
-        self.btn_yara_scan.setEnabled(True)
+            self.mal_model.appendRow([
+                QStandardItem(m['file']),
+                QStandardItem(m['rule']),
+                QStandardItem(str(m['tags'])),
+                QStandardItem(str(m['meta']))
+            ])
+        QMessageBox.warning(self, "Threats Found", f"Detected {len(matches)} suspicious files!")
 
-    # --- Context Menus & Actions ---
-
-    def show_context_menu(self, pos, table, context_type):
-        """Dynamic context menu generator."""
-        index = table.indexAt(pos)
-        if not index.isValid(): return
-        
-        row = index.row()
-        menu = QMenu(self)
-        
-        # 1. AI Analysis Action
-        analyze_act = QAction("✨ AI Analyze / Explain", self)
-        menu.addAction(analyze_act)
-        
-        # 2. Reputation Check
-        if context_type in ["proc", "net"]:
-            rep_act = QAction("✨ Check Reputation (VT)", self)
-            menu.addAction(rep_act)
-            rep_act.triggered.connect(lambda: self.check_reputation(row, table, context_type))
-
-        # 3. Active Response
-        if context_type == "proc":
-             kill_act = QAction("🚫 Terminate Process", self)
-             menu.addAction(kill_act)
-             kill_act.triggered.connect(lambda: self.response_mgr.kill_process(int(self.proc_model.item(row, 1).text())))
-        elif context_type == "net":
-             block_act = QAction("🚫 Block Remote IP", self)
-             menu.addAction(block_act)
-             # Logic to extract IP would go here
-
-        action = menu.exec(table.viewport().mapToGlobal(pos))
-        
-        if action == analyze_act:
-             self.trigger_ai_analysis(row, context_type)
-
-    def trigger_ai_analysis(self, row, context_type):
-        """Constructs context payload and calls AIWorker."""
-        context_data = {}
-        if context_type == "risk":
-            context_data = {
-                "type": "exposure",
-                "port": self.risk_model.item(row, 0).text(),
-                "process_name": self.risk_model.item(row, 2).text(),
-                "risk_score": self.risk_model.item(row, 3).text(),
-                "risk_reasons": "High risk score detected on exposed port."
-            }
-        elif context_type == "intel":
-             context_data = {
-                 "type": "cve",
-                 "title": self.intel_model.item(row, 2).text(),
-                 "description": self.intel_model.item(row, 0).data(Qt.ItemDataRole.UserRole)
-             }
-        elif context_type == "cve":
-             context_data = {
-                 "type": "cve",
-                 "title": f"Vulnerability in {self.vuln_model.item(row, 1).text()}",
-                 "description": f"CVE ID: {self.vuln_model.item(row, 2).text()}"
-             }
-        
-        if context_data:
-            self.status_bar.showMessage("Asking Gemini AI...")
-            self.ai_worker = AIWorker(context_data)
-            self.ai_worker.result.connect(self.show_ai_result)
-            self.ai_worker.start()
-
-    def show_ai_result(self, text):
-        self.status_bar.showMessage("AI Analysis Complete")
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Gemini AI Analysis")
-        dlg.resize(600, 500)
-        lay = QVBoxLayout(dlg)
-        txt = QTextEdit()
-        txt.setMarkdown(text)
-        txt.setReadOnly(True)
-        lay.addWidget(txt)
-        btn = QPushButton("Close")
-        btn.clicked.connect(dlg.accept)
-        lay.addWidget(btn)
-        dlg.exec()
-
-    def check_reputation(self, row, table, context_type):
-        path = ""
-        if context_type == "proc":
-            path = self.proc_model.item(row, 3).text() # Path col
-        
-        if not path:
-             QMessageBox.warning(self, "Error", "No path available for this item.")
-             return
-
-        self.status_bar.showMessage(f"Checking Reputation: {path}...")
-        self.rep_worker = ReputationWorker(path)
-        self.rep_worker.finished.connect(self.on_reputation_result)
-        self.rep_worker.start()
-
-    def on_reputation_result(self, result):
-        self.status_bar.showMessage("Reputation Check Complete")
-        QMessageBox.information(self, "VirusTotal Result", str(result))
-
-    def run_bulk_action(self, action, model, table_type):
-        """Iterates over checked rows and applies action."""
-        count = 0
-        for row in range(model.rowCount()):
-            if model.item(row, 0).checkState() == Qt.CheckState.Checked:
-                # Execute action
-                count += 1
-        
-        QMessageBox.information(self, "Bulk Selection", f"Selected {count} items (Action not fully implemented in demo).")
+if __name__ == "__main__":
+    # Entry Point
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
