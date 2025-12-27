@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy Policy | ProjectX</title>
+    <style>
+        :root {
+            --primary: #007acc;
+            --secondary: #00b4d8;
+            --dark: #1e1e1e;
+            --darker: #121212;
+            --text: #e0e0e0;
+            --accent: #ff0055;
+            --success: #00ff88;
+        }
+
+        body {
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--darker);
+            color: var(--text);
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+        }
+
+        /* Navigation */
+        nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1.5rem 4rem;
+            background: rgba(30, 30, 30, 0.95);
+            border-bottom: 1px solid #333;
+        }
+
+        .logo {
+            font-size: 1.8rem;
+            font-weight: bold;
+            color: #fff;
+            letter-spacing: 1px;
+            text-decoration: none;
+        }
+
+        .logo span {
+            color: var(--primary);
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 2rem;
+        }
+
+        .nav-links a {
+            color: #ccc;
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.3s;
+        }
+
+        .nav-links a:hover {
+            color: var(--secondary);
+        }
+
+        /* Content */
+        main {
+            padding: 4rem 20%;
+        }
+
+        h1 {
+            color: var(--success);
+            border-bottom: 2px solid #333;
+            padding-bottom: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        h2 {
+            color: var(--secondary);
+            margin-top: 3rem;
+        }
+
+        p,
+        li {
+            color: #ccc;
+            font-size: 1.1rem;
+            margin-bottom: 1rem;
+        }
+
+        ul {
+            background: #252526;
+            padding: 2rem 3rem;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        .highlight {
+            color: #fff;
+            font-weight: bold;
+        }
+
+        footer {
+            padding: 3rem;
+            text-align: center;
+            color: #666;
+            background: #000;
+            border-top: 1px solid #222;
+        }
+    </style>
+</head>
+
+<body>
+
+    <nav>
+        <a href="index.html" class="logo">PROJECT<span>X</span></a>
+        <div class="nav-links">
+            <a href="index.html">Home</a>
+            <a href="docs.html">Documentation</a>
+            <a href="https://github.com/khalidelmerrah/ProjectX-EndPoint" target="_blank">GitHub</a>
+        </div>
+    </nav>
+
+    <main>
+        <h1>Privacy Policy</h1>
+        <p><strong>Effective Date:</strong> December 26, 2025</p>
+        <p>
+            ProjectX is designed with a fundamental commitment to user privacy and data sovereignty.
+            We define our architecture as <strong>"Local-First"</strong>. This means the software prioritizes storing
+            and processing data on your local machine over cloud servers.
+        </p>
+
+        <h2>1. Data Collection & Telemetry</h2>
+        <p>
+            ProjectX <span class="highlight">does NOT collect, transmit, or sell personal data.</span>
+        </p>
+        <ul>
+            <li><strong>No Usage Analytics:</strong> We do not track button clicks, session duration, or user behavior.
+            </li>
+            <li><strong>No Crash Reporting:</strong> Stack traces are logged locally to
+                <code>%APPDATA%/ProjectX/logs</code>. They are not uploaded to us.</li>
+            <li><strong>Local Database:</strong> All inventory data (software lists, process monitoring logs, scan
+                results) is stored in a SQLite database (`projectx.db`) located strictly on your local filesytem.</li>
+        </ul>
+
+        <h2>2. Third-Party Integrations</h2>
+        <p>
+            ProjectX includes optional integrations with third-party services. These features are <strong>disabled by
+                default</strong> and require you to manually provide your own API keys.
+        </p>
+
+        <h3>2.1 NIST National Vulnerability Database (NVD)</h3>
+        <p>
+            If enabled, the application contacts NIST servers to download critical vulnerability information (CVEs).
+            <strong>Data Sent:</strong> None (Read-Only download).
+        </p>
+
+        <h3>2.2 Google Gemini AI (Generative Analysis)</h3>
+        <p>
+            If provided with an API Key, you may choose to click "AI Analyze" on specific alerts.
+            <br>
+            <strong>Data Sent:</strong> Only the specific text snippet you chose to analyze (e.g., a process name or log
+            line) is sent to Google's API.
+            <br>
+            <strong>Storage:</strong> Please refer to <a href="https://policies.google.com/privacy"
+                target="_blank">Google's Generative AI Privacy Terms</a>.
+        </p>
+
+        <h3>2.3 VirusTotal</h3>
+        <p>
+            <strong>Data Sent:</strong> File Hashes (SHA-256) only. We do not upload file contents.
+        </p>
+
+        <h2>3. Secret Storage</h2>
+        <p>
+            ProjectX does <strong>NOT</strong> store API keys, passwords, or secrets in plain-text configuration files.
+            All secrets are stored in the operating system's native vault:
+            <br>
+            <strong>Windows:</strong> Windows Credential Locker
+        </p>
+
+        <h2>4. Contact</h2>
+        <p>
+            For privacy inquiries or to report a security vulnerability, please open an issue on our <a
+                href="https://github.com/khalidelmerrah/ProjectX-EndPoint" style="color: var(--secondary);">GitHub
+                Repository</a>.
+        </p>
+
+    </main>
+
+    <footer>
+        <p>&copy; 2025 ProjectX Independent Research. Released under MIT License.</p>
+    </footer>
+
+</body>
+
+</html>

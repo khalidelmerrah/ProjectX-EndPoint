@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ProjectX: Advanced Endpoint Protection Platform - Capstone Technical Report</title>
+    <style>
+        :root {
+            --primary: #007acc;
+            --secondary: #00b4d8;
+            --dark: #1e1e1e;
+            --darker: #121212;
+            --text: #e0e0e0;
+            --text-dim: #b0b0b0;
+            --accent: #ff0055;
+            --success: #00ff88;
+            --sidebar-width: 300px;
+        }
+
+        body {
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--darker);
+            color: var(--text);
+            line-height: 1.7;
+            margin: 0;
+            padding: 0;
+            display: flex;
+        }
+
+        /* Sidebar Layout */
+        nav#sidebar {
+            width: var(--sidebar-width);
+            height: 100vh;
+            position: fixed;
+            background: #181818;
+            border-right: 1px solid #333;
+            overflow-y: auto;
+            padding: 2rem;
+            box-sizing: border-box;
+        }
+
+        main {
+            margin-left: var(--sidebar-width);
+            padding: 4rem 6rem;
+            max-width: 1200px;
+        }
+
+        /* Typography */
+        h1 {
+            font-size: 3rem;
+            color: #fff;
+            margin-bottom: 0.5rem;
+            letter-spacing: 2px;
+        }
+
+        h2 {
+            font-size: 2rem;
+            color: var(--primary);
+            border-bottom: 2px solid #333;
+            padding-bottom: 1rem;
+            margin-top: 4rem;
+        }
+
+        h3 {
+            font-size: 1.5rem;
+            color: #fff;
+            margin-top: 3rem;
+            border-left: 4px solid var(--secondary);
+            padding-left: 1rem;
+        }
+
+        h4 {
+            font-size: 1.2rem;
+            color: var(--text-dim);
+            margin-top: 2rem;
+            font-weight: bold;
+        }
+
+        p,
+        li {
+            font-size: 1.1rem;
+            color: #ccc;
+            text-align: justify;
+            margin-bottom: 1.5rem;
+        }
+
+        /* Code & Pre */
+        pre {
+            background: #252526;
+            padding: 1.5rem;
+            border-radius: 6px;
+            border: 1px solid #444;
+            overflow-x: auto;
+            font-family: 'Fira Code', monospace;
+        }
+
+        code {
+            color: #ce9178;
+            background: #333;
+            padding: 2px 5px;
+            border-radius: 4px;
+        }
+
+        /* Figures */
+        figure {
+            background: #222;
+            padding: 10px;
+            border: 1px solid #444;
+            margin: 2rem 0;
+            text-align: center;
+        }
+
+        img {
+            max-width: 100%;
+            border: 1px solid #555;
+        }
+
+        figcaption {
+            margin-top: 0.5rem;
+            color: #888;
+            font-style: italic;
+            font-size: 0.9rem;
+        }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 2rem 0;
+            font-size: 1rem;
+        }
+
+        th,
+        td {
+            border: 1px solid #444;
+            padding: 12px;
+            text-align: left;
+        }
+
+        th {
+            background: #2d2d2d;
+            color: var(--secondary);
+        }
+
+        tr:nth-child(even) {
+            background: #1e1e1e;
+        }
+
+        /* Nav Links */
+        nav ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        nav li {
+            margin-bottom: 0.8rem;
+        }
+
+        nav a {
+            text-decoration: none;
+            color: #888;
+            transition: 0.2s;
+            font-size: 1.1rem;
+        }
+
+        nav a:hover {
+            color: #fff;
+            margin-left: 5px;
+        }
+
+        nav h3 {
+            font-size: 1.2rem;
+            margin-top: 2rem;
+            color: var(--primary);
+            border: none;
+            padding: 0;
+        }
+    </style>
+</head>
+
+<body>
+
+    <nav id="sidebar">
+        <h3>ProjectX Report</h3>
+        <ul>
+            <li><a href="index.html" style="color: var(--secondary);">← Back to Home</a></li>
+            <li><a href="#executive">1. Executive Summary</a></li>
+            <li><a href="#arch">2. Architecture</a></li>
+            <li><a href="#supplychain">3. Supply Chain Security</a></li>
+            <li><a href="#dictionary">4. Data Dictionary (23 Tables)</a></li>
+            <li><a href="#security">5. Security Framework</a></li>
+            <li><a href="privacy.html" style="color: var(--success); font-weight: bold;">[Privacy Policy]</a></li>
+            <li><a href="#integrations">6. Cloud Integrations</a></li>
+            <li><a href="#visuals">7. Visual Framework</a></li>
+            <li><a href="#downloads" style="color: var(--success); font-weight: bold;">8. Downloads</a></li>
+        </ul>
+        <h3>Resources</h3>
+        <ul>
+            <li><a href="https://github.com/khalidelmerrah/ProjectX-EndPoint" target="_blank">View on GitHub ↗</a></li>
+        </ul>
+    </nav>
+
+    <main>
+        <header>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <h1>PROJECT X</h1>
+                    <p style="font-size: 1.5rem; color: var(--secondary);">Advanced User-Mode Endpoint Protection
+                        Platform</p>
+                </div>
+                <a href="https://github.com/khalidelmerrah/ProjectX-EndPoint"
+                    style="background: #333; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; border: 1px solid #555;">View
+                    on GitHub</a>
+            </div>
+            <p><strong>Version:</strong> 1.0.0-Academic | <strong>Build:</strong> Signed/Release</p>
+        </header>
+
+        <section id="executive">
+            <h2>1. Executive Summary</h2>
+            <p>
+                ProjectX is a reference implementation of a next-generation <strong>Endpoint Protection Platform
+                    (EPP)</strong>.
+                Unlike traditional academic projects which function as isolated scripts, ProjectX mimics a
+                commercial-grade agent,
+                integrating real-time telemetry, vulnerability management, and threat intelligence into a unified
+                compiled binary.
+            </p>
+            <p>
+                The core philosophy is **"Visibility is Security"**. By instrumenting the operating system using
+                **OSQuery** (as a sidecar)
+                and analyzing the data in a Python-based **MVC control plane**, ProjectX provides granular insight into
+                running processes,
+                open network sockets, and persistent malware footholds.
+            </p>
+            <p>
+                Crucially, this project addresses the entire **Software Supply Chain**. It is not enough to write secure
+                code; the code must be
+                built, packaged, and delivered securely. ProjectX demonstrates a fully automated, cryptographically
+                verifiable build pipeline
+                utilizing **GitHub Actions** and **SignPath.io**.
+            </p>
+        </section>
+
+        <section id="arch">
+            <h2>2. System Architecture</h2>
+            <p>
+                The application follows a strict <strong>Service-Oriented Architecture (SOA)</strong> encapsulated
+                within a monolithic distributable.
+            </p>
+
+            <h3>2.1 The Bootstrap Process (app.py)</h3>
+            <p>
+                The entry point (`app.py`) is designed as a "Defense-in-Depth" barrier. Before any UI is rendered, the
+                system performs:
+            <ol>
+                <li><strong>Environment Integrity Check:</strong> Verifies `sys.frozen` state to determine if running as
+                    script or binary.</li>
+                <li><strong>Logging Initialization:</strong> Captures startup errors immediately to storage.</li>
+                <li><strong>Safe Mode Evaluation:</strong> Checks configuration for a `safe_mode` flag to bypass heavy
+                    scanning engines.</li>
+            </ol>
+            </p>
+
+            <h3>2.2 The Sidecar Pattern (OSQuery)</h3>
+            <p>
+                ProjectX does not use kernel drivers. Instead, it spawns `osqueryi.exe` as a child process. This
+                "Sidecar" exposes the OS
+                as a relational database.
+                <br>
+                <em>Advantage:</em> If the query engine crashes, the main GUI handles the exception gracefully without
+                Blue Screening (BSOD) the host.
+            </p>
+
+            <h3>2.3 Concurrency & Threading (workers.py)</h3>
+            <p>
+                The `ScanWorker` implements a linear state machine (Inventory -> Network -> Vulnerability).
+                Changes in state are committed transactionally to SQLite.
+                The UI is decoupled via the **Observer Pattern** (Qt Signals/Slots), ensuring 60 FPS rendering even
+                during heavy I/O.
+            </p>
+        </section>
+
+        <section id="supplychain">
+            <h2>3. Supply Chain Security & Build Integrity</h2>
+            <p>
+                The most critical vulnerability in modern software is the build pipeline itself.
+                Attackers targeting developers (e.g., SolarWinds, CodeCov) inject malware <em>before</em> the software
+                is signed.
+            </p>
+
+            <h3>3.1 Threat Analysis</h3>
+            <p>
+                <strong>Threat 1: False Code Injection.</strong> A compromised developer machine commits malicious code.
+                <br><em>Mitigation:</em> Protected Branches requiring PR reviews.
+                <br><br>
+                <strong>Threat 2: Build Environment Compromise.</strong> Malware on the build server infects the
+                compiler.
+                <br><em>Mitigation:</em> Ephemeral GitHub Runners. Every build starts from a clean, distinct VM image.
+                <br><br>
+                <strong>Threat 3: Key Theft.</strong> Attackers steal the Code Signing Certificate (`.pfx`).
+                <br><em>Mitigation:</em> <strong>Cloud HSM Signing.</strong> Private keys never exist on disk.
+            </p>
+
+            <h3>3.2 Chain of Trust (GitHub -> SignPath)</h3>
+            <p>
+                We implement a strict verification chain using `SignPath/github-action-submit-signing-request@v2`.
+            </p>
+            <ul>
+                <li><strong>Step 1:</strong> GitHub Actions compiles the binary (`ProjectX.exe`).</li>
+                <li><strong>Step 2:</strong> The binary is hashed (SHA-256).</li>
+                <li><strong>Step 3:</strong> The hash is sent to SignPath.io.</li>
+                <li><strong>Step 4:</strong> SignPath verifies the request connects to a specific GitHub Run ID and
+                    Repo.</li>
+                <li><strong>Step 5:</strong> If valid, the hash is signed by a DigiCert certificate stored in a Hardware
+                    Security Module (HSM).</li>
+                <li><strong>Step 6:</strong> The signature is embedded back into the PE (Portable Executable) header.
+                </li>
+            </ul>
+
+            <h3>3.3 OS Enforcement (Authenticode)</h3>
+            <p>
+                Windows enforces integrity via **Authenticode**. When `ProjectX.exe` runs:
+                1. The kernel calculates the checksum of the file.
+                2. It decrypts the embedded signature using the public key.
+                3. If the hases match, **Integrity** is proven (File not tampered).
+                4. It checks the Timestamp Server to ensure the cert was valid *at signing time*.
+            </p>
+        </section>
+
+        <section id="dictionary">
+            <h2>4. Data Dictionary</h2>
+            <p>
+                The application data layer is hybrid:
+                <strong>7 Internal Persistence Tables</strong> (SQLite) +
+                <strong>16 Virtual Tables</strong> (OSQuery Interface).
+                Total: 23 Managed Data Entities.
+            </p>
+
+            <h3>4.1 Internal Persistence (SQLite)</h3>
+            <table>
+                <tr>
+                    <th>Table</th>
+                    <th>Description</th>
+                    <th>Columns</th>
+                </tr>
+                <tr>
+                    <td><code>installed_software</code></td>
+                    <td>Asset Inventory</td>
+                    <td>id, name, version, publisher, install_date</td>
+                </tr>
+                <tr>
+                    <td><code>telemetry_network</code></td>
+                    <td>Socket History</td>
+                    <td>id, pid, local_addr, remote_addr, state</td>
+                </tr>
+                <tr>
+                    <td><code>system_posture</code></td>
+                    <td>Audit Logs</td>
+                    <td>id, check_name, status, timestamp</td>
+                </tr>
+                <tr>
+                    <td><code>exposed_services</code></td>
+                    <td>Attack Surface</td>
+                    <td>id, port, protocol, process_name, risk_score</td>
+                </tr>
+                <tr>
+                    <td><code>startup_items</code></td>
+                    <td>Persistence</td>
+                    <td>id, name, path, location, args, status</td>
+                </tr>
+                <tr>
+                    <td><code>vulnerability_matches</code></td>
+                    <td>CVE Findings</td>
+                    <td>id, software_id (FK), cve_id, confidence</td>
+                </tr>
+                <tr>
+                    <td><code>threat_advisories</code></td>
+                    <td>Intel Feed</td>
+                    <td>id, advisory_id, title, cvss_vector, summary</td>
+                </tr>
+            </table>
+
+            <h3>4.2 Virtual Schema (OSQuery Inteface)</h3>
+            <p>These tables are queried dynamically via `managers.py` logic.</p>
+            <table>
+                <tr>
+                    <th>Virtual Table</th>
+                    <th>Purpose</th>
+                    <th>Mapped Class</th>
+                </tr>
+                <tr>
+                    <td><code>processes</code></td>
+                    <td>Live Process List</td>
+                    <td>ProcessMonitor</td>
+                </tr>
+                <tr>
+                    <td><code>users</code></td>
+                    <td>User Accounts</td>
+                    <td>IdentityManager</td>
+                </tr>
+                <tr>
+                    <td><code>groups</code></td>
+                    <td>User Groups</td>
+                    <td>IdentityManager</td>
+                </tr>
+                <tr>
+                    <td><code>interface_addresses</code></td>
+                    <td>Network Adapters</td>
+                    <td>NetworkScanner</td>
+                </tr>
+                <tr>
+                    <td><code>listening_ports</code></td>
+                    <td>Open Sockets</td>
+                    <td>NetworkScanner</td>
+                </tr>
+                <tr>
+                    <td><code>arp_cache</code></td>
+                    <td>Neighbor Discovery</td>
+                    <td>NetworkScanner</td>
+                </tr>
+                <tr>
+                    <td><code>dns_cache</code></td>
+                    <td>Resolution History</td>
+                    <td>NetworkScanner</td>
+                </tr>
+                <tr>
+                    <td><code>programs</code></td>
+                    <td>Installed Programs</td>
+                    <td>SoftwareManager</td>
+                </tr>
+                <tr>
+                    <td><code>patches</code></td>
+                    <td>Windows Updates</td>
+                    <td>SoftwareManager</td>
+                </tr>
+                <tr>
+                    <td><code>certificates</code></td>
+                    <td>Trusted Root Certs</td>
+                    <td>CertificateManager</td>
+                </tr>
+                <tr>
+                    <td><code>etc_hosts</code></td>
+                    <td>DNS Overrides</td>
+                    <td>NetworkScanner</td>
+                </tr>
+                <tr>
+                    <td><code>startup_items</code></td>
+                    <td>Auto-Run Registry</td>
+                    <td>SoftwareManager</td>
+                </tr>
+                <tr>
+                    <td><code>services</code></td>
+                    <td>Windows Services</td>
+                    <td>SoftwareManager</td>
+                </tr>
+                <tr>
+                    <td><code>registry</code></td>
+                    <td>Raw RegKeys</td>
+                    <td>SystemInspector</td>
+                </tr>
+                <tr>
+                    <td><code>scheduled_tasks</code></td>
+                    <td>Cron/TaskSched</td>
+                    <td>SystemInspector</td>
+                </tr>
+                <tr>
+                    <td><code>drivers</code></td>
+                    <td>Kernel Modules</td>
+                    <td>SystemInspector</td>
+                </tr>
+            </table>
+        </section>
+
+        <section id="security">
+            <h2>5. Security Framework</h2>
+
+            <p>
+                For details on data handling and telemetry, please consult the separate <a href="privacy.html"
+                    style="color: var(--secondary);">Privacy Policy</a>.
+            </p>
+
+            <h3>5.1 Secret Management (Keyring)</h3>
+            <p>
+                Hardcoding API tokens is a critical flaw. ProjectX uses the OS-native backend via Python's `keyring`
+                library.
+                Creds are stored in <strong>Windows Credential Locker</strong>.
+            </p>
+            <pre><code>import keyring
+# Retrieve token securely
+api_token = keyring.get_password("ProjectX", "SignPath_Token")</code></pre>
+
+            <h3>5.2 Pattern Matching (YARA)</h3>
+            <p>
+                Signature-based detection is implemented using **YARA**. We traverse the filesystem and apply regex-like
+                rules
+                to file headers.
+                <br>
+                <em>Example Rule:</em> Detecting a reverse shell payload in a PNG image (Steganography).
+            </p>
+
+            <h3>5.3 Input Sanitization</h3>
+            <p>
+                The `backend/advisory_feed.py` module demonstrates parsing hostile HTML.
+                We use `re.sub(r'<[^>]+>', '', text)` to strip XSS vectors before storing descriptions in the DB.
+            </p>
+        </section>
+
+        <section id="integrations">
+            <h2>6. Cloud Integrations (Offline-First Design)</h2>
+            <p>
+                ProjectX is designed to function as a standalone air-gapped security tool ("Offline Mode").
+                However, attaching cloud API keys unlocks advanced telemetry and analysis features.
+            </p>
+
+            <h3>6.1 NIST National Vulnerability Database (NVD)</h3>
+            <p>
+                Required for CVE correlation. Without this key, the "Vulnerabilities" scan will be skipped.
+                <br>
+                <a href="https://nvd.nist.gov/developers/request-an-api-key" target="_blank">Request NVD API Key</a>
+            </p>
+
+            <h3>6.2 Google Gemini AI (Generative Analysis)</h3>
+            <p>
+                Unlocks the "AI Analyze" button for processes and natural language explanations for alerts.
+                <br>
+                <a href="https://aistudio.google.com/app/apikey" target="_blank">Get Gemini API Key</a>
+            </p>
+
+            <h3>6.3 VirusTotal (Hash Reputation)</h3>
+            <p>
+                Used to verify file hashes against a global malware database.
+                <br>
+                <a href="https://www.virustotal.com/gui/join-us" target="_blank">Join VirusTotal Community</a>
+            </p>
+
+            <div class="alert">
+                <strong>Note:</strong> API Keys are stored securely in the OS Credential Locker (Windows CredMan)
+                and are never sent to ProjectX telemetry servers.
+            </div>
+        </section>
+
+        <section id="visuals">
+            <h2>6. Visual Framework</h2>
+
+            <figure>
+                <img src="https://placehold.co/800x450/252526/007acc?text=Dashboard+Overview" alt="Dashboard">
+                <figcaption>Figure 1: The Main Dashboard aggregation layer. Note the KPI cards at the top.</figcaption>
+            </figure>
+
+            <figure>
+                <img src="https://placehold.co/800x450/252526/ff4444?text=Vulnerability+Scan+Matrix" alt="Vuln Scan">
+                <figcaption>Figure 2: The CVE Matching Matrix. Correlates software versions with NVD data.</figcaption>
+            </figure>
+
+            <figure>
+                <img src="https://placehold.co/800x450/252526/00ff88?text=Certificate+Chain" alt="Certs">
+                <figcaption>Figure 3: Certificate Verification UX. Displays Chain of Trust for signed binaries.
+                </figcaption>
+            </figure>
+
+            <figure>
+                <img src="https://placehold.co/800x300/181818/ff0055?text=Process+Termination" alt="Kill Process">
+                <figcaption>Figure 4: Active Response Action. The user terminates a malicious PID.</figcaption>
+            </figure>
+
+            <figure>
+                <img src="https://placehold.co/800x200/181818/b0b0b0?text=SQL+Injection+Defense" alt="SQLi">
+                <figcaption>Figure 5: Code snippet demonstrating Parameterized Queries in `db_manager.py`.</figcaption>
+            </figure>
+
+            <figure>
+                <img src="https://placehold.co/800x200/181818/b0b0b0?text=Secure+Boot+Log" alt="Logs">
+                <figcaption>Figure 6: Boot sequence logging verifying Integrity Checks.</figcaption>
+            </figure>
+
+            <figure>
+                <img src="https://placehold.co/800x400/2d2d2d/ffffff?text=OSQuery+Relational+Map" alt="OSQuery">
+                <figcaption>Figure 7: Data flow diagram from `osqueryi.exe` pipe to Python dictionary.</figcaption>
+            </figure>
+
+            <figure>
+                <img src="https://placehold.co/800x200/181818/00b4d8?text=SignPath+Workflow" alt="CI/CD">
+                <figcaption>Figure 8: The SignPath.io Cloud Signing handoff visualization.</figcaption>
+            </figure>
+
+            <figure>
+                <img src="https://placehold.co/600x400/1e1e1e/aaaaaa?text=YARA+Rule+Structure" alt="YARA">
+                <figcaption>Figure 9: Anatomy of a customized YARA detection rule used in the scanner.</figcaption>
+            </figure>
+
+            <figure>
+                <img src="https://placehold.co/800x300/1e1e1e/cc0000?text=FIM+Alert+Popup" alt="FIM">
+                <figcaption>Figure 10: File Integrity Monitor toaster notification triggered by filesystem changes.
+                </figcaption>
+            </figure>
+
+            <figure>
+                <img src="https://placehold.co/800x200/222/666?text=Unit+Test+Coverage" alt="Tests">
+                <figcaption>Figure 11: PyTest coverage report ensuring logic stability.</figcaption>
+            </figure>
+
+            <figure>
+                <img src="https://placehold.co/800x200/222/666?text=Dependency+Graph" alt="Deps">
+                <figcaption>Figure 12: Dependency tree showing pinned versions to prevent Supply Chain attacks.
+                </figcaption>
+            </figure>
+
+            <figure>
+                <img src="https://placehold.co/800x400/000/fff?text=Memory+Forensics" alt="RAM">
+                <figcaption>Figure 13: Memory stats collected by `psutil` displayed in the Live Monitor.</figcaption>
+            </figure>
+
+            <figure>
+                <img src="https://placehold.co/800x300/333/fff?text=Safe+Mode+Splash" alt="Splash">
+                <figcaption>Figure 14: The LoaderScreen indicating Safe Mode bootstrap usage.</figcaption>
+            </figure>
+
+            <figure>
+                <img src="https://placehold.co/800x200/111/fff?text=Final+Assembly" alt="Exe">
+                <figcaption>Figure 15: The final single-file executable `ProjectX.exe` with Authenticode stamp.
+                </figcaption>
+            </figure>
+
+        </section>
+
+        <section id="downloads">
+            <h2>8. Downloads</h2>
+            <div
+                style="background: #252526; padding: 30px; border-radius: 8px; border: 1px solid #444; text-align: center;">
+                <h3 style="margin-top: 0; border: none; padding: 0;">OFFICIAL RELEASE</h3>
+                <p><strong>Status:</strong> Pending SignPath Foundation Approval</p>
+
+                <p>
+                    Official signed binaries are currently awaiting cryptographic verification by the SignPath
+                    Foundation.
+                    <br>
+                    In the interim, security researchers and academic reviewers may:
+                </p>
+
+                <div style="display: flex; gap: 20px; justify-content: center; margin-top: 20px;">
+                    <a href="https://github.com/khalidelmerrah/ProjectX-EndPoint/actions"
+                        style="background: #2ea44f; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">
+                        Download from GitHub Actions
+                    </a>
+                    <a href="https://github.com/khalidelmerrah/ProjectX-EndPoint"
+                        style="background: #333; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; border: 1px solid #555;">
+                        Build from Source
+                    </a>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+</body>
+
+</html>

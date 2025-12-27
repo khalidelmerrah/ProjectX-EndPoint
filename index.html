@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ProjectX | Open Source User-Mode EDR</title>
+    <style>
+        :root {
+            --primary: #007acc;
+            --secondary: #00b4d8;
+            --dark: #1e1e1e;
+            --darker: #121212;
+            --text: #e0e0e0;
+            --accent: #ff0055;
+            --success: #00ff88;
+            --card-accent: #555;
+        }
+
+        body {
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--darker);
+            color: var(--text);
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+        }
+
+        /* Navigation */
+        nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1.5rem 4rem;
+            background: rgba(18, 18, 18, 0.95);
+            border-bottom: 1px solid #333;
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+            backdrop-filter: blur(10px);
+        }
+
+        .logo {
+            font-size: 1.8rem;
+            font-weight: bold;
+            color: #fff;
+            letter-spacing: 1px;
+            text-decoration: none;
+        }
+
+        .logo span {
+            color: var(--primary);
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 2rem;
+        }
+
+        .nav-links a {
+            color: #ccc;
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.3s;
+        }
+
+        .nav-links a:hover {
+            color: var(--secondary);
+        }
+
+        /* Buttons */
+        .cta-button {
+            background: var(--primary);
+            color: white;
+            padding: 0.4rem 1rem;
+            font-size: 0.95rem;
+            border-radius: 4px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: background 0.3s;
+        }
+
+        .cta-button:hover {
+            background: var(--secondary);
+        }
+
+        .btn-large {
+            padding: 0.8rem 1.8rem;
+            font-size: 1rem;
+            border-radius: 6px;
+            text-decoration: none;
+            font-weight: bold;
+            border: 1px solid transparent;
+            transition: all 0.2s;
+            display: inline-block;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--secondary);
+        }
+
+        .btn-secondary {
+            border-color: #555;
+            color: #ccc;
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .btn-secondary:hover {
+            border-color: #fff;
+            color: #fff;
+            background: rgba(255, 255, 255, 0.1);
+            box-shadow: 0 0 15px rgba(255, 255, 255, 0.1);
+        }
+
+        /* Hero Section */
+        header.hero {
+            padding: 6rem 5%;
+            text-align: center;
+            background: radial-gradient(circle at center, rgba(0, 122, 204, 0.1) 0%, transparent 70%);
+        }
+
+        h1 {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            line-height: 1.2;
+            color: white;
+        }
+
+        .tagline {
+            font-size: 1.5rem;
+            color: var(--secondary);
+            margin-bottom: 2rem;
+        }
+
+        .hero-text {
+            font-size: 1.2rem;
+            color: #aaa;
+            max-width: 700px;
+            margin: 0 auto 3rem auto;
+        }
+
+        .hero-buttons {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+        }
+
+        /* SECTIONS & GRID (The missing parts) */
+        section {
+            padding: 5rem max(5%, calc((100% - 1200px) / 2));
+        }
+
+        section.alt {
+            background-color: #181818;
+        }
+
+        h2 {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 3rem;
+            color: white;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 2rem;
+        }
+
+        .card {
+            background: linear-gradient(160deg, #252526 0%, #1e1e1e 100%);
+            padding: 2.5rem;
+            border-radius: 16px;
+            border: 1px solid #333;
+            position: relative;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .card::before {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 3px;
+            background: var(--card-accent);
+            transition: height 0.3s;
+        }
+
+        .card:hover {
+            transform: translateY(-8px);
+            box-shadow: 0 15px 30px rgba(0, 0, 0, 0.5);
+        }
+
+        .card:hover::before {
+            height: 5px;
+            box-shadow: 0 0 15px var(--card-accent);
+        }
+
+        .accent-blue {
+            --card-accent: var(--primary);
+        }
+
+        .accent-purple {
+            --card-accent: #bf00ff;
+        }
+
+        .accent-green {
+            --card-accent: var(--success);
+        }
+
+        h3 {
+            color: white;
+            margin-top: 0;
+        }
+
+        .feature-list {
+            list-style: none;
+            padding: 0;
+            margin-top: 1.5rem;
+        }
+
+        .feature-list li {
+            padding: 0.5rem 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            color: #ccc;
+        }
+
+        /* Burger Menu */
+        .burger {
+            display: none;
+            cursor: pointer;
+            flex-direction: column;
+            gap: 5px;
+            z-index: 2000;
+        }
+
+        .burger div {
+            width: 25px;
+            height: 3px;
+            background-color: white;
+            transition: all 0.3s ease;
+        }
+
+        /* Mobile specific adjustments */
+        @media (max-width: 768px) {
+            .burger {
+                display: flex;
+            }
+
+            nav {
+                padding: 1rem 2rem;
+            }
+
+            .nav-links {
+                position: absolute;
+                top: 70px;
+                /* Below Navbar */
+                right: 2rem;
+                width: 220px;
+                background-color: #252526;
+                display: flex;
+                flex-direction: column;
+                align-items: flex-start;
+                padding: 1.5rem;
+                border-radius: 12px;
+                box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+                border: 1px solid #333;
+                transform: translateY(-20px);
+                opacity: 0;
+                pointer-events: none;
+                transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+                z-index: 1500;
+            }
+
+            .nav-links.active {
+                transform: translateY(0);
+                opacity: 1;
+                pointer-events: all;
+            }
+
+            .nav-links a {
+                color: #e0e0e0;
+                font-size: 1.1rem;
+                padding: 0.5rem 0;
+                width: 100%;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            }
+
+            .nav-links a:last-child {
+                border-bottom: none;
+            }
+
+            /* Burger Animation */
+            .toggle .line1 {
+                transform: rotate(-45deg) translate(-5px, 6px);
+            }
+
+            .toggle .line2 {
+                opacity: 0;
+            }
+
+            .toggle .line3 {
+                transform: rotate(45deg) translate(-5px, -6px);
+            }
+
+            /* Mobile CTA Button - Centered */
+            .nav-links .cta-button {
+                margin-top: 1rem;
+                display: block;
+                text-align: center;
+                /* USER REQUESTED FIX */
+                width: 100%;
+                /* Ensure full width for centering */
+                box-sizing: border-box;
+            }
+
+            h1 {
+                font-size: 2.2rem;
+            }
+
+            section {
+                padding: 4rem 1.5rem;
+            }
+        }
+
+        /* Footer Alignment */
+        footer {
+            text-align: center;
+            padding: 3rem 1rem;
+            color: #666;
+            margin-top: 4rem;
+            border-top: 1px solid #252526;
+        }
+    </style>
+</head>
+
+<body>
+
+    <nav>
+        <a href="#" class="logo">PROJECT<span>X</span></a>
+
+        <!-- Burger Icon -->
+        <div class="burger" onclick="toggleMenu()">
+            <div class="line1"></div>
+            <div class="line2"></div>
+            <div class="line3"></div>
+        </div>
+
+        <div class="nav-links" id="navLinks">
+            <a href="#visibility" onclick="toggleMenu()">Visibility</a>
+            <a href="#intelligence" onclick="toggleMenu()">Intelligence</a>
+            <a href="#trust" onclick="toggleMenu()">Privacy</a>
+            <a href="docs.html">Docs</a>
+            <a href="https://github.com/khalidelmerrah/ProjectX-EndPoint" target="_blank">GitHub</a>
+            <!-- Move CTA inside nav-links for mobile menu context -->
+            <a href="#downloads" class="cta-button" onclick="toggleMenu()">Download v1.0</a>
+        </div>
+
+        <!-- Desktop only CTA (hidden on mobile via CSS if needed, or structured differently) -->
+        <!-- For simplicity in this layout, we'll hide the standalone CTA on mobile and show the one inside nav-links, 
+              or keep nav-links unified. The structure above puts everything in the menu. -->
+    </nav>
+
+    <script>
+        function toggleMenu() {
+            const nav = document.getElementById('navLinks');
+            const burger = document.querySelector('.burger');
+            nav.classList.toggle('active');
+            burger.classList.toggle('toggle');
+        }
+    </script>
+
+
+    <header class="hero">
+        <h1>Enterprise Security. <br> Open Availability.</h1>
+        <div class="tagline">The Open Source Endpoint Protection Platform</div>
+        <p class="hero-text">
+            Stop relying on black-box antivirus. <strong>ProjectX</strong> gives you raw, SQL-based visibility into your
+            operating system combined with AI-driven threat analysis.
+            <br><br>
+            Transparent. Local-First. Community Driven.
+        </p>
+        <div class="hero-buttons">
+            <a href="#downloads" class="btn-large btn-primary">Download v1.0</a>
+            <a href="#visibility" class="btn-large btn-secondary">Explore Features</a>
+        </div>
+    </header>
+
+    <!-- VISIBILITY -->
+    <section id="visibility" class="alt">
+        <h2>Unmatched Visibility</h2>
+        <div class="grid">
+            <div class="card accent-blue">
+                <h3>🚀 Powered by OSQuery</h3>
+                <p>We leverage Facebook's battle-tested <strong>OSQuery engine</strong> to treat your OS like a
+                    relational database.</p>
+                <ul class="feature-list">
+                    <li>Query running processes via SQL</li>
+                    <li>Monitor open network sockets in real-time</li>
+                    <li>Inspect kernel modules and drivers</li>
+                </ul>
+            </div>
+            <div class="card accent-blue">
+                <h3>⚡ Lightweight & Reactive</h3>
+                <p>Built for performance. Unlike Electron apps, ProjectX uses native Python/Qt6 bindings.</p>
+                <ul class="feature-list">
+                    <li>
+                        < 50MB RAM usage during idle</li>
+                    <li>Decoupled threading for lag-free UI</li>
+                    <li>Instant startup time</li>
+                </ul>
+            </div>
+        </div>
+    </section>
+
+    <!-- INTELLIGENCE -->
+    <section id="intelligence">
+        <h2 style="margin-bottom: 3rem;">Actionable Intelligence</h2>
+        <div class="grid">
+            <div class="card accent-purple">
+                <h3>🧠 Generative AI Analysis</h3>
+                <p>Don't just see a process name; understand its intent. One-click integration with <strong>Google
+                        Gemini</strong>.</p>
+                <ul class="feature-list">
+                    <li>Explain suspicious command-line arguments</li>
+                    <li>Analyze parent/child process relationships</li>
+                    <li>Get plain-English threat assessments</li>
+                </ul>
+            </div>
+            <div class="card accent-purple">
+                <h3>🛡️ Automated CVE Shield</h3>
+                <p>ProjectX correlates your installed software inventory against the <strong>NIST National Vulnerability
+                        Database</strong>.</p>
+                <ul class="feature-list">
+                    <li>Detect unpatched application vulnerabilities</li>
+                    <li>Prioritize fixes based on CVSS scores</li>
+                    <li>No manual version checking required</li>
+                </ul>
+            </div>
+        </div>
+    </section>
+
+    <!-- TRUST -->
+    <section id="trust" class="alt">
+        <h2 style="margin-bottom: 3rem;">Privacy & Trust</h2>
+        <div class="grid">
+            <div class="card accent-green">
+                <h3>🔒 Local-First Architecture</h3>
+                <p>Your security data belongs to you. We've architected ProjectX to be fully functional offline.</p>
+                <ul class="feature-list">
+                    <li>No cloud dashboard or easy-to-hack web portals</li>
+                    <li>Data stored in local SQLite (`projectx.db`)</li>
+                    <li>API Keys stored in Windows Credential Locker</li>
+                </ul>
+            </div>
+            <div class="card accent-green">
+                <h3>✅ Supply Chain Integrity</h3>
+                <p>We take software supply chain security seriously. Every byte is verified.</p>
+                <ul class="feature-list">
+                    <li>Builds are cryptographically signed via <strong>SignPath.io</strong></li>
+                    <li>Reproducible GitHub Actions builds</li>
+                    <li>Prevents tampering and "dll-jacking"</li>
+                </ul>
+            </div>
+        </div>
+    </section>
+
+    <section id="updates">
+        <h2>Recent Updates</h2>
+        <div style="max-width: 800px; margin: 0 auto;">
+            <div class="changelog-item">
+                <div class="changelog-date">December 27, 2025</div>
+                <div class="changelog-title">v1.1.0 - The "Graceful" Update</div>
+                <div class="changelog-desc">
+                    Added "Offline-First" capabilities. The app now gracefully degrades if no internet or API keys are
+                    present.
+                    Improved UI responsiveness and reduced memory footprint. Added comprehensive documentation site.
+                </div>
+            </div>
+            <div class="changelog-item">
+                <div class="changelog-date">December 20, 2025</div>
+                <div class="changelog-title">v1.0.0 - Academic Release</div>
+                <div class="changelog-desc">
+                    Initial public release. Integrated OSQuery sidecar, NIST CVE correlation, and Google Gemini 1.5
+                    Flash analysis.
+                    Implemented secure OS Keychain storage for all secrets.
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="downloads" class="alt" style="text-align: center; padding: 6rem 10%;">
+        <h2 style="margin-bottom: 1rem;">Download ProjectX</h2>
+        <p style="color: #bbb; margin-bottom: 3rem; font-size: 1.2rem;">
+            Open Source. MIT License. Auditable Code.
+        </p>
+
+        <div class="download-box">
+            <p style="color: #ffaa00; font-weight: bold; margin-bottom: 20px;">⚠️ Status: Pending SignPath Foundation
+                Signing</p>
+
+            <div
+                style="display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; position: relative; z-index: 1;">
+                <a href="https://github.com/khalidelmerrah/ProjectX-EndPoint/actions" class="btn-large"
+                    style="background: #2ea44f; color: white; border: none;">
+                    Download Artifacts
+                </a>
+                <a href="https://github.com/khalidelmerrah/ProjectX-EndPoint" class="btn-large btn-secondary">
+                    View Source Code
+                </a>
+            </div>
+            <p style="margin-top: 20px; font-size: 0.9rem; color: #888; position: relative; z-index: 1;">
+                Supported OS: Windows 10/11 (x64)
+            </p>
+        </div>
+    </section>
+
+    <footer>
+        <p>&copy; 2025 ProjectX Independent Research. <br> Released under the MIT License.</p>
+        <p>
+            <a href="docs.html" style="color: #666; margin: 0 10px; text-decoration: none;">Documentation</a> |
+            <a href="privacy.html" style="color: #666; margin: 0 10px; text-decoration: none;">Privacy Policy</a> |
+            <a href="https://github.com/khalidelmerrah/ProjectX-EndPoint"
+                style="color: #666; margin: 0 10px; text-decoration: none;">GitHub</a>
+        </p>
+    </footer>
+
+</body>
+
+</html>
