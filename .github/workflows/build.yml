@@ -26,10 +26,28 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller
 
+    - name: Fetch OSQuery Sidecar
+      shell: pwsh
+      run: |
+        # Create expected directory structure
+        New-Item -ItemType Directory -Force -Path bin
+        
+        # Download official MSI
+        Invoke-WebRequest -Uri "https://pkg.osquery.io/windows/osquery-5.12.1.msi" -OutFile "osquery.msi"
+        
+        # Administrative extraction to temporary directory
+        Start-Process msiexec.exe -Wait -ArgumentList "/a osquery.msi /qb TARGETDIR=$pwd\osq_temp"
+        
+        # Relocate binary to path expected by managers.py and PyInstaller
+        Move-Item -Path "osq_temp\osquery\osqueryi.exe" -Destination "bin\osqueryi.exe" -Force
+        
+        # Cleanup
+        Remove-Item -Path "osquery.msi"
+        Remove-Item -Path "osq_temp" -Recycle -Force
+
     - name: Bundle Executable with PyInstaller
       run: |
-        # Bundling app.py as entry point
-        # Including osqueryi.exe in the bin/ directory as required by OSQueryClient
+        # Source-to-Destination syntax: "source;destination" for Windows
         pyinstaller --noconfirm --onefile --windowed --name "ProjectX" --add-binary "bin/osqueryi.exe;bin" app.py
 
     - name: Upload Unsigned Artifact
@@ -40,7 +58,6 @@ jobs:
         path: dist/ProjectX.exe
 
     - name: Submit Signing Request to SignPath.io
-      # Casing MUST be 'SignPath' (capital S and P)
       uses: SignPath/github-action-submit-signing-request@v2
       with:
         api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -51,21 +68,3 @@ jobs:
         github-token: ${{ secrets.GITHUB_TOKEN }}
         wait-for-completion: true
         output-artifact-directory: 'dist/signed'
-
-    - name: Download OSQuery Binary
-      run: |
-        mkdir bin
-        # Fetch the official osquery MSIs from the repository
-        curl -L https://pkg.osquery.io/windows/osquery-5.10.2.msi -o osquery.msi
-        # Extract the binary using msiexec without installing the full package
-        msiexec /a osquery.msi /qb TARGETDIR=%CD%\temp_osquery
-        # Move the standalone shell to the expected bin/ directory
-        move "%CD%\temp_osquery\osquery\osqueryi.exe" "bin\osqueryi.exe"
-        # Cleanup temporary files
-        del osquery.msi
-        rmdir /s /q temp_osquery
-
-    - name: Bundle Executable with PyInstaller
-      run: |
-        # PyInstaller now finds the binary in the local bin/ folder
-        pyinstaller --noconfirm --onefile --windowed --name "ProjectX" --add-binary "bin/osqueryi.exe;bin" app.py
